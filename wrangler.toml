@@ -1,0 +1,46 @@
+# FSB Appraisal Desk on Cloudflare Workers
+name = "fsb-appraisal-desk"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+# Production hostname. Cloudflare creates the DNS record and certificate on deploy.
+routes = [
+  { pattern = "fsb.apprifi.com", custom_domain = true }
+]
+
+# The app files. Unknown paths fall back to index.html so hash links always land.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/f/*"]
+
+[vars]
+PUBLIC_URL = "https://fsb.apprifi.com"
+# MAIL_FROM = "First Security Bank Appraisal Desk <appraisals@fsb.apprifi.com>"
+# MAIL_REPLY_TO = "someone@fsb1.com"
+
+# Orders, people, audit log, message queue. Create with: npx wrangler d1 create fsb-portal
+[[d1_databases]]
+binding = "DB"
+database_name = "fsb-portal"
+database_id = "6b6807bb-e4e0-4f1c-9f97-9cc98abb1262"
+migrations_dir = "migrations"
+
+# Document bytes. Create with: npx wrangler kv namespace create FILES
+[[kv_namespaces]]
+binding = "FILES"
+id = "85874fed1930410eb70ea081b9278011"
+
+# Optional larger document store (needs R2 enabled on the account). Uncomment to switch from KV.
+# [[r2_buckets]]
+# binding = "BUCKET"
+# bucket_name = "fsb-portal-docs"
+
+# Retries queued email every five minutes and prunes expired sessions.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Secrets (never in this file): npx wrangler secret put AUTH_SECRET
+# Optional: RESEND_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM

@@ -436,6 +436,40 @@
   .empty{padding:34px 16px;text-align:center;color:var(--ink-3)}
   .empty b{display:block;font-family:var(--serif);font-size:16px;color:var(--ink-2);margin-bottom:5px}
 
+
+  /* ---------- phone ----------
+     Two things matter here: iOS Safari zooms the page when a focused input is
+     under 16px, and a 700px table inside a 341px column shows the address and
+     nothing else. Both are fixed below. */
+  @media (max-width: 640px){
+    label.f input, label.f select, label.f textarea{ font-size:16px; padding:11px 12px; }
+    .btn{ padding:11px 16px; min-height:44px }
+    .btn-s{ padding:10px 14px; font-size:13px; min-height:44px }
+    .slot{ padding:13px; min-height:48px }
+    .slot-t{ min-height:52px }
+    .fbtn{ padding:13px 20px; min-height:46px }
+    #demobar button{ padding:9px 15px; min-height:38px }
+    .att input{ width:24px; height:24px }
+    .chip.act{ min-height:44px; padding:9px 14px }
+    .doc .btn-s{ min-height:40px }
+    .tabs button{ padding:11px 13px; min-height:44px }
+    .bandin button{ padding:15px 16px 13px }
+
+    /* The order board becomes one card per order. */
+    .tablewrap{ overflow-x:visible }
+    table{ min-width:0; width:100% }
+    thead{ display:none }
+    tbody tr{ display:block; padding:13px 16px }
+    tbody td{ display:flex; justify-content:space-between; align-items:center;
+              gap:14px; padding:5px 0; border:0; text-align:right }
+    tbody td::before{ content:attr(data-label); font-size:10.5px; font-weight:700;
+              letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3);
+              flex:none; text-align:left }
+    tbody td:first-child{ display:block; padding:0 0 9px; text-align:left }
+    tbody td:first-child::before{ display:none }
+    tbody td .rail{ justify-content:flex-end }
+  }
+
   footer{margin-top:26px;padding-top:18px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12.5px;display:flex;flex-direction:column;gap:7px}
   footer b{color:var(--ink-2);font-weight:700}
 </style>
@@ -739,11 +773,11 @@
       var late=o.due && o.step<6 && new Date(o.due+"T23:59:59")<new Date();
       return '<tr data-open="'+esc(o.id)+'"'+(o.id===S.sel?' aria-current="true"':'')+'>'+
         '<td><button class="addrbtn" data-open="'+esc(o.id)+'"><span class="addr">'+esc(o.addr)+'<small>'+esc(o.city)+'</small></span></button></td>'+
-        '<td class="mono sm muted">'+esc(o.id.slice(0,10))+'</td>'+
-        '<td class="sm">'+esc(o.type)+'</td>'+
-        '<td class="sm">'+esc(o.borrowerName||"")+'</td>'+
-        '<td>'+rail(o)+pill(o)+'</td>'+
-        '<td class="mono sm'+(late?'" style="color:var(--red);font-weight:700':'')+'">'+esc(fmtDate(o.due))+(late?" late":"")+'</td>'+
+        '<td class="mono sm muted" data-label="Order">'+esc(o.id.slice(0,10))+'</td>'+
+        '<td class="sm" data-label="Type">'+esc(o.type)+'</td>'+
+        '<td class="sm" data-label="Borrower">'+esc(o.borrowerName||"")+'</td>'+
+        '<td data-label="Status">'+rail(o)+pill(o)+'</td>'+
+        '<td class="mono sm'+(late?'" style="color:var(--red);font-weight:700':'')+'" data-label="Due">'+esc(fmtDate(o.due))+(late?" late":"")+'</td>'+
       '</tr>';
     }).join("");
     return '<div class="panel"><div class="ph"><div><h2>'+(readonly?"Order status":"Order board")+'</h2>'+
@@ -1717,6 +1751,13 @@
   #demobar button:hover{background:rgba(255,255,255,.12)}
   body{padding-bottom:46px}
   .fbtn{bottom:58px!important}
+  @media (max-width:640px){
+    /* The bar wraps to two lines on a phone; keep the feedback button clear of it. */
+    #demobar{font-size:11px;line-height:1.35}
+    #demobar button{min-height:40px}
+    body{padding-bottom:86px}
+    .fbtn{bottom:96px!important}
+  }
 </style>
 
 </body>

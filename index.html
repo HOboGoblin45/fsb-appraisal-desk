@@ -1,0 +1,1723 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%224%22 fill=%22%231f4984%22/%3E%3Ctext x=%2216%22 y=%2223%22 font-family=%22Georgia,serif%22 font-size=%2220%22 font-weight=%22bold%22 fill=%22white%22 text-anchor=%22middle%22%3E1%3C/text%3E%3C/svg%3E">
+<meta name="description" content="Working demonstration of an appraisal ordering, status and inspection scheduling portal. Sample data only.">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,-apple-system,"Segoe UI",sans-serif;background:#fff}img{max-width:100%}[hidden]{display:none!important}</style>
+</head>
+<body>
+
+<script>
+/* ------------------------------------------------------------------
+   Static demo runtime.
+
+   The application talks to window.claude.use("db" | "assets" | "downloads").
+   On claude.ai those are provided by the platform and shared between people.
+   Here there is no server, so this implements the same three interfaces on top
+   of this browser's localStorage. Everything works, but it is private to this
+   browser: two people opening the demo each get their own copy.
+   ------------------------------------------------------------------ */
+(function () {
+  "use strict";
+  window.__FSB_STATIC__ = true;
+  var NS = "fsbdemo.v1.";
+  var subs = [];
+
+  function read(k) {
+    try { var v = localStorage.getItem(NS + k); return v ? JSON.parse(v) : null; }
+    catch (e) { return null; }
+  }
+  function write(k, v) {
+    try { localStorage.setItem(NS + k, JSON.stringify(v)); return true; }
+    catch (e) {
+      if (e && (e.name === "QuotaExceededError" || e.code === 22)) {
+        throw { code: "quota_exceeded", message: "This browser's demo storage is full. Use Reset demo." };
+      }
+      throw { code: "unavailable", message: "Could not save in this browser." };
+    }
+  }
+  function del(k) { try { localStorage.removeItem(NS + k); } catch (e) {} }
+  function keys(prefix) {
+    var out = [];
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (k && k.indexOf(NS + prefix) === 0) out.push(k.slice(NS.length));
+      }
+    } catch (e) {}
+    return out;
+  }
+  function fire() { subs.forEach(function (f) { try { f(); } catch (e) {} }); }
+  window.addEventListener("storage", function (e) {
+    if (e && e.key && e.key.indexOf(NS) === 0) fire();
+  });
+
+  function snapDoc(path) {
+    var d = read(path);
+    return { id: path.split("/").pop(), exists: !!d, data: function () { return d; },
+             metadata: { fromCache: false, hasPendingWrites: false } };
+  }
+
+  function docRef(path) {
+    return {
+      id: path.split("/").pop(), path: path,
+      get: function () { return Promise.resolve(snapDoc(path)); },
+      set: function (d) {
+        return new Promise(function (res, rej) {
+          try { write(path, JSON.parse(JSON.stringify(d))); fire(); res(); } catch (e) { rej(e); }
+        });
+      },
+      update: function (d) {
+        return new Promise(function (res, rej) {
+          var cur = read(path);
+          if (!cur) return rej({ code: "invalid_argument", message: "No such record." });
+          Object.keys(d).forEach(function (k) { cur[k] = d[k]; });
+          try { write(path, cur); fire(); res(); } catch (e) { rej(e); }
+        });
+      },
+      "delete": function () { del(path); fire(); return Promise.resolve(); },
+      onSnapshot: function (next) {
+        var f = function () { next(snapDoc(path)); };
+        subs.push(f); setTimeout(f, 0);
+        return function () { var i = subs.indexOf(f); if (i > -1) subs.splice(i, 1); };
+      },
+      collection: function (sub) { return collRef(path + "/" + sub); }
+    };
+  }
+
+  function collRef(cpath) {
+    var depth = cpath.split("/").length + 1;
+    function docsNow() {
+      return keys(cpath + "/").filter(function (k) { return k.split("/").length === depth; })
+        .sort().map(function (k) {
+          var d = read(k);
+          return { id: k.split("/").pop(), exists: true, data: function () { return d; },
+                   metadata: { fromCache: false, hasPendingWrites: false } };
+        });
+    }
+    var q = {
+      path: cpath,
+      doc: function (id) { return docRef(cpath + "/" + (id || ("x" + Math.random().toString(36).slice(2, 12)))); },
+      add: function (d) { var r = q.doc(); return r.set(d).then(function () { return r; }); },
+      where: function () { return q; }, orderBy: function () { return q; }, limit: function () { return q; },
+      get: function () { var ds = docsNow(); return Promise.resolve({ docs: ds, size: ds.length, empty: !ds.length, docChanges: function () { return []; }, metadata: {} }); },
+      onSnapshot: function (next) {
+        var f = function () {
+          var ds = docsNow();
+          next({ docs: ds, size: ds.length, empty: !ds.length, docChanges: function () { return []; }, metadata: {} });
+        };
+        subs.push(f); setTimeout(f, 0);
+        return function () { var i = subs.indexOf(f); if (i > -1) subs.splice(i, 1); };
+      }
+    };
+    return q;
+  }
+
+  /* assets: files are held as data URLs in this browser. */
+  var MAX = 1400000; // ~1.4 MB, to stay inside a typical localStorage budget
+  var assets = {
+    upload: function (blob, opts) {
+      return new Promise(function (res, rej) {
+        if (!blob || !blob.size) return rej({ code: "invalid_request", message: "Empty file." });
+        if (blob.size > MAX) return rej({ code: "too_large", message: "The demo accepts files under 1.4 MB." });
+        var fr = new FileReader();
+        fr.onerror = function () { rej({ code: "upstream_error", message: "Could not read that file." }); };
+        fr.onload = function () {
+          var id = "a" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+          try { write("_blob/" + id, { d: fr.result, t: (opts && opts.type) || blob.type || "application/octet-stream" }); }
+          catch (e) { return rej({ code: "quota_or_state", message: "Demo storage is full. Use Reset demo." }); }
+          res({ id: id, url: "/_blob/" + id, sizeBytes: blob.size, contentType: (opts && opts.type) || blob.type });
+        };
+        fr.readAsDataURL(blob);
+      });
+    },
+    list: function () { return Promise.resolve({ assets: [], usage: { files: 0, bytes: 0, maxFiles: 0, maxBytes: 0 } }); },
+    "delete": function (id) { del("_blob/" + String(id).replace("/_blob/", "")); return Promise.resolve({ deleted: true }); }
+  };
+
+  /* The app fetches "/_blob/<id>" to download an attachment. Serve it locally. */
+  var realFetch = window.fetch ? window.fetch.bind(window) : null;
+  window.fetch = function (input, init) {
+    var url = (typeof input === "string") ? input : (input && input.url) || "";
+    var m = /\/_blob\/([A-Za-z0-9_-]+)$/.exec(url);
+    if (m) {
+      var rec = read("_blob/" + m[1]);
+      if (!rec) return Promise.resolve(new Response(null, { status: 404, statusText: "Not Found" }));
+      return fetch_dataurl(rec.d, rec.t);
+    }
+    return realFetch ? realFetch(input, init) : Promise.reject(new Error("fetch unavailable"));
+  };
+  function fetch_dataurl(dataUrl, type) {
+    var b64 = dataUrl.split(",")[1] || "";
+    var bin = atob(b64), len = bin.length, arr = new Uint8Array(len);
+    for (var i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
+    return Promise.resolve(new Response(new Blob([arr], { type: type }), { status: 200 }));
+  }
+
+  /* downloads: a real browser download. No sandbox here. */
+  var downloads = {
+    save: function (req) {
+      return new Promise(function (res, rej) {
+        try {
+          var data = req.data;
+          var blob = (data instanceof Blob) ? data : new Blob([data], { type: "text/plain;charset=utf-8" });
+          var u = URL.createObjectURL(blob);
+          var a = document.createElement("a");
+          a.href = u; a.download = req.filename || "download";
+          document.body.appendChild(a); a.click();
+          setTimeout(function () { URL.revokeObjectURL(u); a.remove(); }, 1500);
+          res({ status: "saved" });
+        } catch (e) { rej({ code: "unavailable", message: "Download failed in this browser." }); }
+      });
+    }
+  };
+
+  window.claude = {
+    use: function (name) {
+      if (name === "db") return Promise.resolve({ doc: docRef, collection: collRef });
+      if (name === "assets") return Promise.resolve(assets);
+      if (name === "downloads") return Promise.resolve(downloads);
+      return Promise.resolve(null);
+    }
+  };
+
+  /* ---- seed, so a first-time visitor sees a working system ---- */
+  window.__fsbReset = function () {
+    keys("").forEach(function (k) { del(k); });
+    try { localStorage.removeItem("fsb.me"); } catch (e) {}
+    location.hash = "";
+    location.reload();
+  };
+  if (!read("config/availability")) {
+    var SEED = {"config/availability":{"days":[1,2,3,4,5],"startHour":8.5,"endHour":16,"slotMinutes":60,"bufferMinutes":45,"leadHours":24,"appraiserName":"","appraiserPhone":"","note":"Set the appraiser name and callback number on the Appraiser settings tab."},"orders/sample-hershey":{"agentPhone":"","borrowerEmail":"","rush":false,"docs":[],"attestation":true,"orderedBy":"Sample data","orderedByRole":"Appraisal desk","hold":false,"holdReason":"","notes":"Sample order. Everyone here is invented.","addr":"1120 Hershey Rd","city":"Normal, IL 61761","loan":"2026-004390","type":"1004 URAR","purpose":"Refinance","due":"2026-09-25","fee":600,"borrowerName":"Owen Brandt","borrowerPhone":"(309) 555-0192","agentName":"","accessVia":"Borrower","step":2,"tokB":"demo7borrower4hershey2x","tokA":"demo7agent4hershey9kq2v","orderedAt":"2026-09-13T14:00:00Z","log":[{"t":"2026-09-13T14:00:00Z","who":"Sample data (appraisal desk)","what":"Order created. Recusal attestation recorded."},{"t":"2026-09-13T14:00:00Z","who":"Appraiser","what":"Order accepted. Fee $600."},{"t":"2026-09-14T14:00:00Z","who":"Appraiser","what":"Scheduling request sent to Owen Brandt."}],"outbox":[{"t":"2026-09-14T14:00:00Z","channel":"SMS","to":"Owen Brandt","subject":"","body":"Time to schedule your appraisal inspection at 1120 Hershey Rd. Pick a time that works: [link]. Takes about 60 minutes."}],"createdAt":"2026-09-13T14:00:00Z","updatedAt":"2026-09-14T14:00:00Z"},"orders/sample-empire":{"agentPhone":"","borrowerEmail":"","rush":false,"docs":[],"attestation":true,"orderedBy":"Sample data","orderedByRole":"Appraisal desk","hold":true,"holdReason":"Tenant access not yet arranged","notes":"Sample order. Everyone here is invented.","addr":"2417 E Empire St","city":"Bloomington, IL 61704","loan":"2026-004302","type":"Commercial narrative","purpose":"Refinance","due":"2026-10-06","fee":2750,"borrowerName":"Empire Holdings LLC","borrowerPhone":"(309) 555-0163","agentName":"Marcy Teague, Kestrel Realty","accessVia":"Agent","step":1,"tokB":"demo3borrower8empire5nz","tokA":"demo3agent8empire7wmr4","orderedAt":"2026-09-10T14:00:00Z","log":[{"t":"2026-09-10T14:00:00Z","who":"Sample data (appraisal desk)","what":"Order created. Recusal attestation recorded."},{"t":"2026-09-10T14:00:00Z","who":"Appraiser","what":"Order accepted."},{"t":"2026-09-12T14:00:00Z","who":"Appraiser","what":"Placed on hold: Tenant access not yet arranged"}],"outbox":[{"t":"2026-09-12T14:00:00Z","channel":"Email","to":"Appraisal desk","subject":"Appraisal on hold: 2417 E Empire St","body":"The appraisal at 2417 E Empire St is on hold. Reason: Tenant access not yet arranged. No action is needed from the borrower. First Security Bank."}],"createdAt":"2026-09-10T14:00:00Z","updatedAt":"2026-09-12T14:00:00Z"}};
+    Object.keys(SEED).forEach(function (k) { try { write(k, SEED[k]); } catch (e) {} });
+  }
+})();
+</script>
+<title>FSB Appraisal Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&family=PT+Serif:wght@400;700&display=swap">
+<style>
+  :root{
+    color-scheme:light;
+    --navy:#1f4984;
+    --navy-deep:#16355f;
+    --navy-soft:#eaf0f8;
+    --blue:#03138c;
+    --red:#790000;
+    --red-soft:#f7ebeb;
+    --sand:#e8d5b5;
+    --sand-soft:#fbf6ee;
+    --ink:#22303f;
+    --ink-2:#56646f;
+    --ink-3:#6b7884;
+    --paper:#ffffff;
+    --surface:#ffffff;
+    --surface-2:#f7f8fa;
+    --strip:#f2f3f5;
+    --line:#dde2e8;
+    --line-2:#e9edf1;
+    --ok:#1a7050;
+    --ok-soft:#e4f2ec;
+    --wait:#8a6209;
+    --wait-soft:#faf1dc;
+    --shadow:0 1px 2px rgba(31,73,132,.05);
+    --r:4px;
+    --sans:"Open Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    --serif:"PT Serif",Georgia,"Times New Roman",serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{min-height:100%}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  h1,h2,h3,h4{margin:0;font-family:var(--serif);font-weight:700;text-wrap:balance;letter-spacing:-.005em;color:var(--navy)}
+  p{margin:0}
+  button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}
+  input,select,textarea{font:inherit;color:inherit}
+  :focus-visible{outline:2px solid var(--navy);outline-offset:2px;border-radius:4px}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .lbl{font-size:10.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+  .muted{color:var(--ink-2)}
+  .sm{font-size:12.5px}
+
+  .bar{
+    background:var(--strip);color:var(--navy);
+    border-bottom:1px solid var(--line-2);
+    padding:6px 16px;text-align:center;
+    font-size:11.5px;font-weight:700;letter-spacing:.03em;
+  }
+  .bar em{font-style:normal;color:var(--ink-2);font-weight:400;letter-spacing:0;font-size:11.5px}
+
+  header.top{background:var(--surface);border-bottom:1px solid var(--line);padding:14px 0}
+  .topin{max-width:1180px;margin:0 auto;padding-inline:16px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between}
+  .logo{display:block;height:46px;width:auto;background:#fff;padding:3px 5px;border-radius:2px}
+  @media (max-width:420px){.logo{height:38px}}
+
+  .band{background:var(--navy);border-bottom:3px solid var(--navy-deep)}
+  .bandin{max-width:1180px;margin:0 auto;padding-inline:16px;display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}
+  .bandin::-webkit-scrollbar{display:none}
+  .bandin button{
+    padding:13px 16px 11px;font-size:12.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+    color:rgba(255,255,255,.82);white-space:nowrap;border-bottom:3px solid transparent;margin-bottom:-3px;
+  }
+  .bandin button:hover:not(:disabled){color:#fff}
+  .bandin button:disabled{cursor:default;opacity:.9}
+  .bandin button[aria-selected="true"]{color:#fff;border-bottom-color:#fff}
+
+  .wrap{max-width:1180px;margin:0 auto;padding-inline:16px;padding-block:0 70px}
+  .mast{padding-block:20px 4px}
+  .mast h1{font-size:clamp(20px,3.2vw,26px)}
+  .mast .tag{color:var(--ink-2);font-size:13.5px;margin-top:3px;max-width:104ch}
+
+  .chip{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:5px 11px;font-size:12px;color:var(--ink-2)}
+  .chip b{color:var(--ink);font-weight:600}
+  .chip.act{cursor:pointer}
+  .chip.act:hover{border-color:var(--navy)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
+  .dot.off{background:var(--ink-3)}
+
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+  .panel+.panel{margin-top:14px}
+  .ph{padding:14px 16px;border-bottom:1px solid var(--line-2);display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+  .ph h2{font-size:16px}
+  .ph .note{color:var(--ink-2);font-size:12.5px;max-width:56ch}
+  .pb{padding:16px}
+
+  .btn{border-radius:7px;padding:8px 14px;font-size:13px;font-weight:600;border:1px solid var(--line);background:var(--surface-2);color:var(--ink);transition:background .12s,border-color .12s}
+  .btn:hover:not(:disabled){background:var(--line-2)}
+  .btn-p{background:var(--navy);border-color:var(--navy);color:#fff}
+  .btn-p:hover:not(:disabled){background:var(--navy-deep);border-color:var(--navy-deep)}
+  .btn:disabled{opacity:.42;cursor:not-allowed}
+  .btn-s{padding:6px 10px;font-size:12px;font-weight:600}
+
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .stack{display:flex;flex-direction:column;gap:14px}
+  .stack-s{display:flex;flex-direction:column;gap:8px}
+
+  .tablewrap{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;min-width:700px}
+  thead th{text-align:left;padding:9px 16px;background:var(--surface-2);border-bottom:1px solid var(--line-2);font-size:10.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);white-space:nowrap}
+  tbody tr{border-bottom:1px solid var(--line-2);cursor:pointer}
+  tbody tr:last-child{border-bottom:0}
+  tbody tr:hover{background:var(--surface-2)}
+  tbody tr[aria-current="true"]{background:var(--navy-soft)}
+  td{padding:11px 16px;vertical-align:middle}
+  .addr{font-weight:600;font-size:13.5px}
+  .addr small{display:block;font-weight:400;color:var(--ink-2);font-size:12px}
+
+  .rail{display:flex;gap:3px;margin-bottom:4px}
+  .rail i{width:12px;height:4px;border-radius:2px;background:var(--line);display:block}
+  .rail i.done{background:var(--ok)}
+  .rail i.now{background:var(--navy)}
+  .pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:3px 9px;font-size:11.5px;font-weight:700;white-space:nowrap}
+  .pill.ok{background:var(--ok-soft);color:var(--ok)}
+  .pill.wait{background:var(--wait-soft);color:var(--wait)}
+  .pill.info{background:var(--navy-soft);color:var(--navy)}
+  .pill.crit{background:var(--red-soft);color:var(--red)}
+
+  .detail{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr)}
+  .dm{padding:16px;min-width:0}
+  .ds{padding:16px;border-left:1px solid var(--line-2);background:var(--surface-2);min-width:0}
+  @media (max-width:840px){.detail{grid-template-columns:1fr}.ds{border-left:0;border-top:1px solid var(--line-2)}}
+
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line-2);margin-bottom:14px;overflow-x:auto;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tabs button{padding:8px 11px;font-size:12.5px;font-weight:600;color:var(--ink-2);border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
+  .tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--navy)}
+
+  .tl{display:flex;flex-direction:column;list-style:none;margin:0;padding:0}
+  .tl li{display:grid;grid-template-columns:22px minmax(0,1fr);gap:12px;padding-bottom:13px;position:relative}
+  .tl li:last-child{padding-bottom:0}
+  .tl li::before{content:"";position:absolute;left:10px;top:19px;bottom:-4px;width:1.5px;background:var(--line)}
+  .tl li:last-child::before{display:none}
+  .tl .nd{width:21px;height:21px;border-radius:50%;border:1.5px solid var(--line);background:var(--surface);display:grid;place-items:center;font-size:10px;font-weight:700;color:var(--ink-3);font-family:var(--mono);z-index:1}
+  .tl li.done .nd{background:var(--ok);border-color:var(--ok);color:#fff}
+  .tl li.done::before{background:var(--ok)}
+  .tl li.now .nd{background:var(--navy);border-color:var(--navy);color:#fff}
+  .tl .tx b{font-size:13.5px;font-weight:600}
+  .tl li.pend .tx b{color:var(--ink-3);font-weight:400}
+  .tl .tx span{display:block;font-size:12px;color:var(--ink-2)}
+
+  dl.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 14px;font-size:13px;align-items:baseline;margin:0}
+  dl.kv dt{color:var(--ink-3);font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+  dl.kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+
+  .doc{display:flex;gap:10px;align-items:center;padding:9px 11px;background:var(--surface);border:1px solid var(--line-2);border-radius:8px}
+  .doc .ic{width:28px;height:28px;border-radius:5px;background:var(--navy-soft);color:var(--navy);display:grid;place-items:center;font-size:9px;font-weight:700;flex:none;font-family:var(--mono)}
+  .doc .nm{flex:1;min-width:0;font-size:12.5px;font-weight:600;overflow-wrap:anywhere}
+  .doc .nm span{display:block;color:var(--ink-3);font-size:11px;font-weight:400}
+
+  .drop{display:block;width:100%;border:1.5px dashed var(--line);border-radius:9px;padding:16px;text-align:center;background:var(--surface-2);cursor:pointer;color:inherit;font:inherit}
+  .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .addrbtn{display:block;width:100%;text-align:left;padding:0;font:inherit;color:inherit}
+  .addrbtn:hover .addr{color:var(--navy);text-decoration:underline}
+  .drop:hover,.drop.over{border-color:var(--navy);background:var(--navy-soft)}
+  .drop b{display:block;font-size:13px}
+  .drop span{font-size:11.5px;color:var(--ink-3)}
+
+  .log{font-family:var(--mono);font-size:11.5px;line-height:1.6;color:var(--ink-2)}
+  .log div{padding:6px 0;border-bottom:1px dotted var(--line);overflow-wrap:anywhere}
+  .log div:last-child{border-bottom:0}
+  .log b{color:var(--ink);font-weight:500}
+
+  .callout{background:var(--sand-soft);border:1px solid var(--sand);border-radius:8px;padding:11px 13px;font-size:12.5px}
+  .callout b{display:block;margin-bottom:3px;font-weight:700}
+  .callout.nav{background:var(--navy-soft);border-color:color-mix(in srgb,var(--navy) 30%,transparent)}
+
+  label.f{display:flex;flex-direction:column;gap:4px;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);min-width:0}
+  label.f input,label.f select,label.f textarea{
+    font-size:13.5px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--ink);
+    padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);width:100%;
+  }
+  label.f textarea{resize:vertical;min-height:70px;font-family:var(--sans)}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+
+  .att{display:flex;gap:10px;align-items:flex-start;background:var(--red-soft);border:1px solid color-mix(in srgb,var(--red) 30%,transparent);border-radius:8px;padding:12px 13px}
+  .att input{margin-top:3px;width:16px;height:16px;flex:none;accent-color:var(--navy)}
+  .att .t{font-size:12.5px}
+  .att .t b{display:block;font-weight:700;margin-bottom:2px}
+
+  .qcard{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:12px 14px;display:flex;gap:12px;justify-content:space-between;align-items:center;flex-wrap:wrap}
+  .qcard.hot{border-color:var(--navy);background:var(--navy-soft)}
+
+  .phonestage{display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:24px;align-items:start}
+  @media (max-width:780px){.phonestage{grid-template-columns:1fr}}
+  .phone{width:100%;max-width:320px;margin-inline:auto;border:9px solid var(--ink);border-radius:30px;background:var(--surface);overflow:hidden;box-shadow:var(--shadow)}
+  .ptop{background:var(--ink);color:var(--paper);padding:3px 16px 8px;display:flex;justify-content:space-between;font-size:10.5px;font-family:var(--mono)}
+  .pbody{padding:16px 15px 20px;display:flex;flex-direction:column;gap:13px}
+  .vst{list-style:none;margin:0;padding:0}
+  .vst li{display:grid;grid-template-columns:18px minmax(0,1fr);gap:10px;padding:5px 0;align-items:center;position:relative}
+  .vst li::before{content:"";position:absolute;left:8px;top:16px;height:calc(100% - 12px);width:1.5px;background:var(--line)}
+  .vst li:last-child::before{display:none}
+  .vst .nd{width:17px;height:17px;border-radius:50%;border:1.5px solid var(--line);background:var(--surface);z-index:1;display:grid;place-items:center;font-size:9px;color:#fff}
+  .vst li.done .nd{background:var(--ok);border-color:var(--ok)}
+  .vst li.done::before{background:var(--ok)}
+  .vst li.now .nd{background:var(--navy);border-color:var(--navy)}
+  .vst .t{font-size:12.5px;color:var(--ink-3)}
+  .vst li.done .t{color:var(--ink-2)}
+  .vst li.now .t{color:var(--ink);font-weight:700}
+  .nextc{background:var(--surface-2);border:1px solid var(--line-2);border-radius:10px;padding:13px}
+  .nextc h4{font-family:var(--sans);font-size:13px;font-weight:700;margin-bottom:4px}
+  .nextc p{font-size:12.5px;color:var(--ink-2)}
+  .slot{width:100%;text-align:left;border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:11px 13px;font-size:13px;font-weight:700;display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .slot:hover{border-color:var(--navy);background:var(--navy-soft)}
+  .slot span{font-weight:400;color:var(--ink-2);font-size:11.5px;font-family:var(--mono)}
+
+  .clientwrap{max-width:460px;margin:0 auto;padding-top:18px}
+  .calhead{font-family:var(--sans);font-size:13.5px;font-weight:700}
+  .calday{margin-bottom:12px}
+  .calday .lbl{margin-bottom:6px}
+  .caltimes{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:7px}
+  .slot-t{justify-content:center;padding:12px 8px;font-size:13.5px;font-family:var(--mono)}
+  .rolehints{margin:0;padding-left:17px;font-size:12px;color:var(--ink-2);display:flex;flex-direction:column;gap:4px}
+  .rolehints b{color:var(--ink)}
+  .msg{background:var(--surface-2);border:1px solid var(--line-2);border-left:3px solid var(--navy);border-radius:0 8px 8px 0;padding:11px 13px;font-size:12.5px;color:var(--ink-2)}
+  .msg b{color:var(--ink);font-weight:700;display:block;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;margin-bottom:4px}
+  .msg.sms{border-left-color:var(--ok)}
+  .msg.own{border-left-color:var(--sand)}
+
+  .fbtn{
+    position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:50;
+    background:var(--red);color:#fff;border-radius:999px;padding:11px 18px;font-size:13px;font-weight:700;
+    box-shadow:0 8px 22px -8px rgba(0,0,0,.5);
+  }
+  .fbtn:hover{filter:brightness(1.12)}
+  .sheet{position:fixed;inset:0;z-index:55;background:rgba(15,22,30,.5);display:grid;place-items:end center;padding:16px}
+  .sheetc{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;width:100%;max-width:520px;box-shadow:var(--shadow);max-height:86vh;overflow:auto}
+
+  .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(74px + env(safe-area-inset-bottom,0px));z-index:60;background:var(--ink);color:var(--paper);padding:10px 16px;border-radius:9px;font-size:13px;font-weight:600;max-width:calc(100vw - 32px);text-align:center;box-shadow:0 10px 30px -10px rgba(0,0,0,.5)}
+  .toast b{color:var(--sand);font-weight:700}
+
+  .empty{padding:34px 16px;text-align:center;color:var(--ink-3)}
+  .empty b{display:block;font-family:var(--serif);font-size:16px;color:var(--ink-2);margin-bottom:5px}
+
+  footer{margin-top:26px;padding-top:18px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12.5px;display:flex;flex-direction:column;gap:7px}
+  footer b{color:var(--ink-2);font-weight:700}
+</style>
+
+<div class="bar">PILOT <em>Test data only. Do not upload real loan files or borrower documents.</em></div>
+
+<header class="top">
+  <div class="topin">
+    <img class="logo" alt="First Security Bank" src="data:image/png;base64,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">
+    <div class="row" id="whochip"></div>
+  </div>
+</header>
+
+<div class="band"><nav class="bandin" id="views" role="tablist" aria-label="Sections"></nav></div>
+
+<div class="wrap">
+  <div class="mast">
+    <h1>Appraisal Desk</h1>
+    <p class="tag">Order intake, live status, inspection scheduling and delivery between First Security Bank and its appraiser.</p>
+  </div>
+
+  <div id="stage" style="margin-top:16px"></div>
+
+  <footer>
+    <p><b>This is a working pilot, not the finished system.</b> Orders, documents, appointments and the audit log are real and shared: what one person does here, everyone else sees. Borrowers and agents never sign in and never reach this site; each one gets a single secure link to one file. Email and text are not sent yet, so every message the system would send is written to the Outbox tab for you to redline.</p>
+    <p><b>Please use the red Feedback button.</b> It records which screen you were on, so notes land in context. Everything collects on the Feedback tab.</p>
+  </footer>
+</div>
+
+<button class="fbtn" id="fbtn" hidden>Feedback</button>
+<div id="modal"></div>
+<script>
+(function(){
+  "use strict";
+
+  var STEPS = ["Received","Accepted","Scheduling","Scheduled","Inspected","In review","Delivered","Invoiced"];
+  var CLIENT_LABEL = {
+    "Received":"Appraisal ordered","Accepted":"Appraiser assigned","Scheduling":"Pick an inspection time",
+    "Scheduled":"Inspection scheduled","Inspected":"Inspection complete","In review":"Report being prepared",
+    "Delivered":"Report delivered to your lender","Invoiced":"Complete"
+  };
+  var ROLES = {
+    admin:{name:"Bank admin",hint:"Manages who can sign in and what they may do. Does not place orders."},
+    desk:{name:"Appraisal desk",hint:"Loan officer assistant. Places orders, uploads documents."},
+    officer:{name:"Loan officer",hint:"Read only. Sees status, downloads the finished report."},
+    appraiser:{name:"Appraiser",hint:"The assigned appraiser. Accepts, schedules, inspects, delivers."}
+  };
+  function tok(){
+    var a="abcdefghjkmnpqrstuvwxyz23456789", o="";
+    for(var i=0;i<22;i++) o+=a.charAt(Math.floor(Math.random()*a.length));
+    return o;
+  }
+
+  var db=null, assets=null, downloads=null, ready=false;
+  var S = {
+    me:null, view:"board", sel:null, tab:"status",
+    orders:[], config:null, feedback:[], roster:[], busy:false, sheet:null, toastT:null,
+    conn:"connecting", connWhy:"", token:null, tokenWho:null, rosterReady:false
+  };
+
+  /* ---------- helpers ---------- */
+  function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+  function uid(){return "o"+Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
+  function nowISO(){return new Date().toISOString();}
+  function fmtTime(iso){try{var d=new Date(iso);return d.toLocaleString(undefined,{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});}catch(e){return iso;}}
+  function fmtDay(iso){try{return new Date(iso).toLocaleDateString(undefined,{weekday:"long",month:"short",day:"numeric"});}catch(e){return iso;}}
+  function fmtHr(iso){try{return new Date(iso).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});}catch(e){return "";}}
+  function fmtDate(iso){if(!iso)return "not set";try{return new Date(iso+"T12:00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"});}catch(e){return iso;}}
+  function kb(n){return n>=1048576?(n/1048576).toFixed(1)+" MB":Math.max(1,Math.round(n/1024))+" KB";}
+  function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+  function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+
+  function toast(html){
+    var old=document.querySelector(".toast"); if(old) old.remove();
+    if(S.toastT) clearTimeout(S.toastT);
+    var el=document.createElement("div"); el.className="toast"; el.setAttribute("role","status"); el.innerHTML=html;
+    document.body.appendChild(el);
+    S.toastT=setTimeout(function(){el.remove();},4600);
+  }
+  function dbErr(e){
+    var c=(e&&e.code)||"unavailable";
+    if(c==="not_granted"||c==="capability_disabled") return "This view cannot save changes.";
+    if(c==="quota_exceeded") return "The pilot database is full. Tell the administrator.";
+    if(c==="resource_exhausted") return "Too many changes at once. Wait a moment and try again.";
+    if(c==="revoked") return "Your access to this pilot changed. Reload the page.";
+    return "That did not save. Try again.";
+  }
+
+  /* ---------- model ---------- */
+  function aprRaw(){ return ((S.config&&S.config.appraiserName)||"").trim(); }
+  function aprPhone(){ return ((S.config&&S.config.appraiserPhone)||"").trim(); }
+  function aprCap(){ return aprRaw() || "The appraiser"; }
+  function aprLower(){ return aprRaw() || "the appraiser"; }
+  function aprContact(){
+    var p=aprPhone();
+    if(p) return "Questions? Call "+aprLower()+" at "+p+".";
+    return "Questions? Contact your loan officer at First Security Bank.";
+  }
+  function aprSig(){
+    var n=aprRaw(), p=aprPhone();
+    if(n&&p) return n+", "+p+".";
+    if(n) return n+".";
+    if(p) return "Your appraiser, "+p+".";
+    return "First Security Bank.";
+  }
+  function qLine(){ var p=aprPhone(); return p ? (" Questions: "+p+".") : ""; }
+  function assignedLine(){ var n=aprRaw(); return n ? (" "+n+" is your appraiser.") : ""; }
+
+  function status(o){ return o.declined ? "Declined" : (o.hold ? "On hold" : STEPS[o.step]); }
+  function rail(o){
+    var h='<div class="rail" aria-hidden="true">';
+    for(var i=0;i<STEPS.length;i++){
+      var done=(i<o.step)||(i===o.step&&o.step===STEPS.length-1);
+      h+='<i class="'+(done?"done":(i===o.step?"now":""))+'"></i>';
+    }
+    return h+'</div>';
+  }
+  function pill(o){
+    var cls="info";
+    if(o.declined) cls="crit"; else if(o.hold) cls="wait"; else if(o.step>=6) cls="ok"; else if(o.step===0) cls="crit";
+    return '<span class="pill '+cls+'">'+esc(status(o))+'</span>';
+  }
+  function byId(id){ for(var i=0;i<S.orders.length;i++){ if(S.orders[i].id===id) return S.orders[i]; } return null; }
+  function current(){
+    if(S.token){
+      for(var i=0;i<S.orders.length;i++){
+        var o=S.orders[i];
+        if(o.tokB===S.token||o.tokA===S.token) return o;
+      }
+      return null;
+    }
+    return S.sel ? byId(S.sel) : null;
+  }
+  function clientLink(t){
+    return location.origin+location.pathname+"#t="+t;
+  }
+  function readToken(){
+    var h=(location.hash||"").replace(/^#/,"");
+    var m=/(?:^|&)t=([a-z0-9]{10,40})/i.exec(h);
+    return m?m[1]:null;
+  }
+
+  function evt(o,what){
+    var who = S.me ? (S.me.name+" ("+ROLES[S.me.role].name.toLowerCase()+")") : "Someone";
+    (o.log=o.log||[]).push({t:nowISO(),who:who,what:what});
+  }
+  function out(o,channel,to,subject,body){
+    (o.outbox=o.outbox||[]).push({t:nowISO(),channel:channel,to:to,subject:subject,body:body});
+  }
+
+  function upsert(o){
+    for(var k=0;k<S.orders.length;k++){ if(S.orders[k].id===o.id){ S.orders[k]=o; return; } }
+    S.orders.unshift(o);
+  }
+  function save(o,msg){
+    o.updatedAt=nowISO();
+    upsert(o); render();
+    if(!db){ toast(msg ? (msg+" <b>Local only.</b>") : "Changed locally. <b>Not shared: this view is offline.</b>"); return Promise.resolve(); }
+    return db.doc("orders/"+o.id).set(o).then(function(){ if(msg) toast(msg); })
+      .catch(function(e){ toast(esc(dbErr(e))); throw e; });
+  }
+
+  /* ---------- scheduling ---------- */
+  function defaultConfig(){
+    return {days:[1,2,3,4,5],startHour:8.5,endHour:16,slotMinutes:60,bufferMinutes:45,leadHours:24,
+            appraiserName:"",appraiserPhone:"",note:""};
+  }
+  function cfgNum(k,dflt){
+    var v=(S.config||{})[k];
+    v=Number(v);
+    return isFinite(v)&&v>=0 ? v : dflt;
+  }
+  function slotMin(){ return cfgNum("slotMinutes",60)||60; }
+  function bookedTimes(){
+    var t=[]; S.orders.forEach(function(o){ if(o.apptStart) t.push(new Date(o.apptStart).getTime()); }); return t;
+  }
+  function genSlots(limit){
+    var days=((S.config||{}).days)||[1,2,3,4,5];
+    var sh=cfgNum("startHour",8.5), eh=cfgNum("endHour",16);
+    var slotM=slotMin(), bufM=cfgNum("bufferMinutes",45), lead=cfgNum("leadHours",24);
+    if(!days.length || eh<=sh) return [];
+    var slots=[], d=new Date(), cutoff=new Date(Date.now()+lead*3600e3);
+    d.setTime(cutoff.getTime());
+    d.setMinutes(0,0,0);
+    if(d<cutoff) d.setTime(d.getTime()+3600e3);
+    var booked=bookedTimes(), guard=0;
+    var blockMs=(slotM+bufM)*60e3;
+    while(slots.length<(limit||5) && guard<600){
+      guard++;
+      var day=d.getDay();
+      if(days.indexOf(day)===-1){ d.setDate(d.getDate()+1); d.setHours(0,0,0,0); continue; }
+      var h=d.getHours()+d.getMinutes()/60;
+      if(h<sh){ d.setHours(0,0,0,0); d.setTime(d.getTime()+Math.round(sh*3600)*1000); continue; }
+      if(h+slotM/60>eh){ d.setDate(d.getDate()+1); d.setHours(0,0,0,0); continue; }
+      var ms=d.getTime(), clash=false;
+      for(var i=0;i<booked.length;i++){ if(Math.abs(booked[i]-ms)<blockMs){ clash=true; break; } }
+      if(!clash) slots.push(new Date(ms).toISOString());
+      d.setTime(ms+slotM*60e3);
+    }
+    return slots;
+  }
+
+  /* ---------- identity ---------- */
+  function loadMe(){
+    var raw=lsGet("fsb.me");
+    if(raw){ try{ var m=JSON.parse(raw); if(m&&m.id) return m; }catch(e){} }
+    return null;
+  }
+  function rosterById(id){
+    for(var i=0;i<S.roster.length;i++){ if(S.roster[i].id===id) return S.roster[i]; }
+    return null;
+  }
+  // The roster is the authority on role. A stale localStorage entry cannot outrank it.
+  function reconcileMe(){
+    if(!S.me||!S.me.id) return;
+    var r=rosterById(S.me.id);
+    if(!r){ return; }
+    if(r.active===false){ S.me=null; lsSet("fsb.me",""); toast("Your access was suspended by the administrator."); return; }
+    if(r.locked && S.me.role!==r.role){
+      S.me={id:r.id,name:r.name,role:r.role};
+      lsSet("fsb.me",JSON.stringify(S.me));
+      if(!navFor(S.me.role).some(function(i){return i[0]===S.view;})) S.view=homeFor(S.me.role);
+    }
+  }
+  function homeFor(role){ return role==="appraiser"?"queue":(role==="admin"?"people":"board"); }
+  function identityHtml(){
+    if(!S.rosterReady){
+      return '<div class="panel"><div class="empty"><b>One moment</b>Getting things ready.</div></div>';
+    }
+    var known=S.roster.filter(function(r){ return r.active!==false; });
+    var opts=Object.keys(ROLES).map(function(k){
+      return '<option value="'+k+'"'+(k==="desk"?" selected":"")+'>'+esc(ROLES[k].name)+'</option>';
+    }).join("");
+    var quick = known.length ? '<div class="stack-s" style="margin-top:4px">'+
+        '<p class="lbl">Signed in here before?</p>'+
+        '<div class="row">'+known.slice(0,8).map(function(r){
+          return '<button class="btn btn-s" data-quick="'+esc(r.id)+'">'+esc(r.name)+
+                 ' <span class="muted">'+esc((ROLES[r.role]||{}).name||r.role)+'</span></button>';
+        }).join("")+'</div></div>' : "";
+
+    return '<div class="panel"><div class="ph"><div><h2>Sign in</h2>'+
+      '<p class="note">Tell us who you are and what you do here. The role decides which screens you get, because the desk, a loan officer and the appraiser are all doing different jobs.</p></div></div>'+
+      '<div class="pb"><div class="stack" style="max-width:480px">'+
+      '<label class="f">Your name<input id="meName" autocomplete="off"></label>'+
+      '<label class="f">Your work email<input id="meEmail" type="email" autocomplete="off"></label>'+
+      '<label class="f">What do you do here?<select id="meRole">'+opts+'</select></label>'+
+      '<div class="callout" id="roleHint"><b>'+esc(ROLES.desk.name)+'</b>'+esc(ROLES.desk.hint)+'</div>'+
+      '<div><button class="btn btn-p" data-a="signin">Continue</button></div>'+
+      quick+
+      '<p class="sm muted">On the pilot you choose your own role so nobody is blocked from trying it. The bank administrator can correct or lock any role on the People tab, and a locked role wins the next time that person signs in.</p>'+
+      '</div></div></div>';
+  }
+
+  function peopleHtml(){
+    var rows=S.roster.length ? S.roster.map(function(r){
+      var me=S.me&&S.me.id===r.id;
+      return '<tr>'+
+        '<td><div class="addr">'+esc(r.name)+(me?' <span class="pill info">you</span>':'')+'<small>'+esc(r.email||"no email on file")+'</small></div></td>'+
+        '<td class="sm">'+esc((ROLES[r.role]||{}).name||r.role)+'</td>'+
+        '<td>'+(r.locked?'<span class="pill ok">Set by admin</span>':'<span class="pill wait">Self-declared</span>')+'</td>'+
+        '<td>'+(r.active===false?'<span class="pill crit">Suspended</span>':'<span class="pill ok">Active</span>')+'</td>'+
+        '<td><div class="row">'+
+          (me?'<span class="sm muted">You cannot change your own access</span>':
+            '<button class="btn btn-s" data-role-id="'+esc(r.id)+'">Set role</button>'+
+            '<button class="btn btn-s" data-susp="'+esc(r.id)+'">'+(r.active===false?"Restore":"Suspend")+'</button>')+
+        '</div></td></tr>';
+    }).join("") : '';
+
+    return '<div class="panel"><div class="ph"><div><h2>People</h2>'+
+      '<p class="note">Everyone who has signed in, and what they can do. On the pilot people choose their own role, so this is where you correct one. Setting a role here locks it: that person gets what you chose the next time they sign in, whatever they pick.</p></div>'+
+      '<button class="btn btn-p" data-a="addperson">Add someone</button></div>'+
+      (rows?'<div class="tablewrap"><table><thead><tr><th>Person</th><th>Role</th><th>How set</th><th>Status</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+           :'<div class="empty"><b>Nobody yet</b>Add the assistants, the loan officers and the appraiser.</div>')+
+      '<div class="pb"><div class="callout"><b>Why there is no password box.</b> This page can only be opened by someone the bank has already signed in through Claude, so a second password here would add a credential to steal without adding a check. What the bank needs is control over what each signed-in person may do, which is this table. On the real deployment a role would be assigned before first use rather than corrected after.</div></div>'+
+      '</div>';
+  }
+
+  /* ---------- views ---------- */
+  function navFor(role){
+    if(role==="desk")      return [["board","Order board"],["new","New order"],["outbox","Outbox"],["feedback","Feedback"]];
+    if(role==="officer")   return [["board","Order status"],["outbox","Outbox"],["feedback","Feedback"]];
+    if(role==="appraiser") return [["queue","My queue"],["avail","Appraiser settings"],["outbox","Outbox"],["feedback","Feedback"]];
+    if(role==="admin")     return [["people","People"],["board","Order status"],["outbox","Outbox"],["feedback","Feedback"]];
+    return [];
+  }
+  function navHtml(){
+    if(!S.me) return '<button role="tab" aria-selected="true" disabled>Sign in</button>';
+    return navFor(S.me.role).map(function(i){
+      return '<button role="tab" data-v="'+i[0]+'" aria-selected="'+(S.view===i[0])+'">'+esc(i[1])+'</button>';
+    }).join("");
+  }
+
+  function boardHtml(readonly){
+    if(!S.orders.length){
+      return '<div class="panel"><div class="ph"><div><h2>'+(readonly?"Order status":"Order board")+'</h2>'+
+        '<p class="note">'+(readonly?"Read only. Loan officers see status and download the finished report. They cannot place, reassign or cancel an order.":"Everything the desk needs is one table and one button.")+'</p></div>'+
+        (readonly?'<span class="pill wait">View only</span>':'<button class="btn btn-p" data-a="gonew">New order</button>')+'</div>'+
+        '<div class="empty"><b>No orders yet</b>'+(readonly?"Orders placed by the desk will appear here.":"Place the first one and it appears for everyone immediately.")+'</div></div>';
+    }
+    var rows=S.orders.map(function(o){
+      var late=o.due && o.step<6 && new Date(o.due+"T23:59:59")<new Date();
+      return '<tr data-open="'+esc(o.id)+'"'+(o.id===S.sel?' aria-current="true"':'')+'>'+
+        '<td><button class="addrbtn" data-open="'+esc(o.id)+'"><span class="addr">'+esc(o.addr)+'<small>'+esc(o.city)+'</small></span></button></td>'+
+        '<td class="mono sm muted">'+esc(o.id.slice(0,10))+'</td>'+
+        '<td class="sm">'+esc(o.type)+'</td>'+
+        '<td class="sm">'+esc(o.borrowerName||"")+'</td>'+
+        '<td>'+rail(o)+pill(o)+'</td>'+
+        '<td class="mono sm'+(late?'" style="color:var(--red);font-weight:700':'')+'">'+esc(fmtDate(o.due))+(late?" late":"")+'</td>'+
+      '</tr>';
+    }).join("");
+    return '<div class="panel"><div class="ph"><div><h2>'+(readonly?"Order status":"Order board")+'</h2>'+
+      '<p class="note">'+S.orders.length+' order'+(S.orders.length===1?"":"s")+'. '+(readonly?"Read only.":"Click any row to open it.")+'</p></div>'+
+      (readonly?'<span class="pill wait">View only</span>':'<button class="btn btn-p" data-a="gonew">New order</button>')+'</div>'+
+      '<div class="tablewrap"><table><thead><tr><th>Property</th><th>Order</th><th>Type</th><th>Borrower</th><th>Status</th><th>Due</th></tr></thead>'+
+      '<tbody>'+rows+'</tbody></table></div></div>';
+  }
+
+  function timelineHtml(o){
+    return '<ul class="tl">'+STEPS.map(function(s,i){
+      var cls=i<o.step?"done":(i===o.step?"now":"pend");
+      var when=i<o.step?"Complete":(i===o.step?(o.hold?("On hold: "+(o.holdReason||"waiting")):"In progress"):"");
+      return '<li class="'+cls+'"><span class="nd">'+(i<o.step?"&#10003;":(i+1))+'</span>'+
+        '<span class="tx"><b>'+esc(s)+'</b><span>'+esc(when)+'</span></span></li>';
+    }).join("")+'</ul>';
+  }
+
+  function docsHtml(o,canWrite){
+    var list=(o.docs||[]).length? (o.docs||[]).map(function(d){
+      return '<div class="doc"><span class="ic">'+esc((d.name.split(".").pop()||"?").slice(0,4).toUpperCase())+'</span>'+
+        '<span class="nm">'+esc(d.name)+'<span>'+esc(kb(d.size))+' &middot; '+esc(d.by)+' &middot; '+esc(fmtTime(d.at))+'</span></span>'+
+        '<button class="btn btn-s" data-dl="'+esc(d.assetId)+'" data-dlname="'+esc(d.name)+'">Download</button></div>';
+    }).join("") : '<p class="sm muted">No documents yet.</p>';
+    var up = canWrite ? '<button type="button" class="drop"><b>Drop files here, or click to choose</b>'+
+      '<span>PDF, JPG, PNG, CSV, TXT. 20 MB each. Test files only.</span>'+
+      '<input type="file" class="vh" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.csv,.txt,.md,.json"></button>' : "";
+    return '<div class="stack-s">'+list+(up?'<div style="margin-top:6px">'+up+'</div>':'')+'</div>';
+  }
+
+  function logHtml(o){
+    var l=(o.log||[]);
+    if(!l.length) return '<p class="sm muted">No activity yet.</p>';
+    return '<div class="log">'+l.slice().reverse().map(function(e){
+      return '<div><b>'+esc(fmtTime(e.t))+'</b>  '+esc(e.who)+'  &middot;  '+esc(e.what)+'</div>';
+    }).join("")+'</div>';
+  }
+
+  function outboxRows(o){
+    return (o.outbox||[]).slice().reverse().map(function(m){
+      return '<div class="msg '+(m.channel==="SMS"?"sms":"")+'"><b>'+esc(m.channel)+' to '+esc(m.to)+' &middot; '+esc(fmtTime(m.t))+'</b>'+
+        (m.subject?'<div style="font-weight:600;color:var(--ink);margin-bottom:3px">'+esc(m.subject)+'</div>':'')+
+        esc(m.body)+'</div>';
+    }).join("");
+  }
+
+  function detailHtml(o,canWrite){
+    var tabs=[["status","Status"],["docs","Documents ("+((o.docs||[]).length)+")"],["log","Independence log"]];
+    var body;
+    if(S.tab==="docs") body=docsHtml(o,canWrite);
+    else if(S.tab==="log") body='<div class="stack">'+
+      '<div class="callout"><b>Pilot activity record, not yet an exam artifact.</b> It captures who ordered the file, under what role, the recusal attestation, and every status change, message and document. On the pilot identities are self-declared rather than verified, so treat this as a preview of the control, not as evidence. Export it to see the shape.</div>'+
+      logHtml(o)+
+      '<div><button class="btn btn-s" data-a="exportlog">Export independence log</button></div></div>';
+    else body=timelineHtml(o);
+
+    var appt = o.apptStart ? '<dt>Inspection</dt><dd>'+esc(fmtDay(o.apptStart))+'<br><span class="mono sm">'+esc(fmtHr(o.apptStart))+'</span></dd>' : "";
+
+    return '<div class="panel"><div class="ph"><div><h2>'+esc(o.addr)+'</h2>'+
+      '<p class="note mono sm">'+esc(o.id.slice(0,10))+'  &middot;  Loan '+esc(o.loan||"n/a")+'  &middot;  '+esc(o.type)+'  &middot;  '+esc(o.purpose||"")+'</p></div>'+pill(o)+'</div>'+
+      '<div class="detail"><div class="dm"><div class="tabs">'+tabs.map(function(t){
+        return '<button data-tab="'+t[0]+'" aria-selected="'+(S.tab===t[0])+'">'+esc(t[1])+'</button>';
+      }).join("")+'</div>'+body+'</div>'+
+      '<div class="ds"><div class="stack">'+
+        '<dl class="kv">'+
+          '<dt>Borrower</dt><dd>'+esc(o.borrowerName||"not set")+(o.borrowerPhone?'<br><span class="mono sm">'+esc(o.borrowerPhone)+'</span>':"")+'</dd>'+
+          '<dt>Agent</dt><dd>'+esc(o.agentName||"None")+'</dd>'+
+          '<dt>Ordered by</dt><dd>'+esc(o.orderedBy||"")+'<br><span class="sm muted">'+esc(fmtTime(o.orderedAt))+'</span></dd>'+
+          '<dt>Fee</dt><dd class="mono">'+(o.fee?("$"+Number(o.fee).toLocaleString()):"not set")+'</dd>'+
+          '<dt>Due</dt><dd class="mono">'+esc(fmtDate(o.due))+'</dd>'+appt+
+        '</dl>'+
+        (o.tokB?'<div class="stack-s"><p class="lbl">Secure client links</p>'+
+          '<p class="sm muted">One page each: status and inspection booking. No sign-in, and neither link can reach any other file.</p>'+
+          '<div class="row"><button class="btn btn-s" data-copy="'+esc(clientLink(o.tokB))+'">Copy borrower link</button>'+
+          (o.agentName?'<button class="btn btn-s" data-copy="'+esc(clientLink(o.tokA))+'">Copy agent link</button>':'')+
+          '</div></div>':"")+
+        (o.attestation?'<div class="msg own"><b>Recusal attestation on file</b>'+esc(o.orderedBy)+' attested at order placement: "I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction." Recorded '+esc(fmtTime(o.orderedAt))+'.</div>':"")+
+        (canWrite?'<div class="stack-s"><p class="lbl">Desk actions</p>'+
+          '<label class="f">Ask a factual question<textarea id="qbox" placeholder="Additional property information, or a factual correction."></textarea></label>'+
+          '<div><button class="btn btn-s" data-a="ask">Send to appraiser</button></div>'+
+          '<div class="callout"><b>Value cannot be discussed.</b> Questions are limited to factual corrections and additional property information. Every message is logged on the independence tab.</div></div>':"")+
+      '</div></div></div></div>';
+  }
+
+  function newOrderHtml(){
+    return '<div class="panel"><div class="ph"><div><h2>New order</h2>'+
+      '<p class="note">One page, not a wizard. Get it right before placing it: on this build an order cannot be edited or cancelled afterwards, which is the first thing we expect you to ask us to fix.</p></div>'+
+      '<button class="btn btn-s" data-a="goboard">Cancel</button></div>'+
+      '<div class="pb"><div class="stack">'+
+      '<div class="grid2">'+
+        '<label class="f">Property address<input id="n_addr" placeholder="812 N Roosevelt Ave"></label>'+
+        '<label class="f">City, state, ZIP<input id="n_city" placeholder="Bloomington, IL 61701"></label>'+
+      '</div>'+
+      '<div class="grid3">'+
+        '<label class="f">Loan number<input id="n_loan" placeholder="2026-004417"></label>'+
+        '<label class="f">Report type<select id="n_type">'+
+          ['1004 URAR','1073 Condo','1025 Small Residential Income','2055 Exterior','General Purpose','Commercial narrative','Agricultural / farm','Evaluation']
+          .map(function(t){return '<option>'+t+'</option>';}).join("")+'</select></label>'+
+        '<label class="f">Purpose<select id="n_purpose"><option>Purchase</option><option>Refinance</option><option>Construction</option><option>Estate</option><option>Other</option></select></label>'+
+      '</div>'+
+      '<div class="grid3">'+
+        '<label class="f">Due date<input id="n_due" type="date"></label>'+
+        '<label class="f">Fee, if known<input id="n_fee" type="number" placeholder="600"></label>'+
+        '<label class="f">Rush?<select id="n_rush"><option>No</option><option>Yes</option></select></label>'+
+      '</div>'+
+      '<div class="callout"><b>Use invented people.</b> Every pilot participant can read every field on this form, including names, numbers and access notes. Do not enter a real borrower.</div>'+
+      '<p class="lbl" style="margin-top:2px">Who the appraiser contacts for access</p>'+
+      '<div class="grid3">'+
+        '<label class="f">Borrower name<input id="n_bname" placeholder="Dana Whitfield"></label>'+
+        '<label class="f">Borrower mobile<input id="n_bphone" placeholder="(309) 555-0148"></label>'+
+        '<label class="f">Borrower email<input id="n_bemail" placeholder="name@example.com"></label>'+
+      '</div>'+
+      '<div class="grid3">'+
+        '<label class="f">Agent name, if any<input id="n_aname" placeholder="Marcy Teague, Kestrel Realty"></label>'+
+        '<label class="f">Agent mobile<input id="n_aphone"></label>'+
+        '<label class="f">Access contact<select id="n_access"><option>Borrower</option><option>Agent</option><option>Lockbox, no contact</option></select></label>'+
+      '</div>'+
+      '<label class="f">Notes for the appraiser<textarea id="n_notes" placeholder="Tenant occupied, dog on site, gate code, anything that affects access."></textarea></label>'+
+      '<label class="att" for="n_att"><input type="checkbox" id="n_att">'+
+        '<span class="t"><b>Required before this order can be placed</b>I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction. This attestation is timestamped, tied to my name, and cannot be edited afterward.</span></label>'+
+      '<div class="row"><button class="btn btn-p" data-a="createorder">Place order</button>'+
+      '<span class="sm muted">Documents are uploaded on the order once it exists.</span></div>'+
+      '</div></div></div>';
+  }
+
+  function queueHtml(){
+    var o=current();
+    var cards=S.orders.length? S.orders.map(function(x){
+      return '<div class="qcard'+(x.step===0?" hot":"")+'">'+
+        '<div class="addr">'+esc(x.addr)+'<small>'+esc(x.city)+' &middot; '+esc(x.type)+' &middot; due '+esc(fmtDate(x.due))+'</small></div>'+
+        '<div class="row">'+pill(x)+'<button class="btn btn-s" data-open="'+esc(x.id)+'">Open</button></div></div>';
+    }).join("") : '<div class="empty"><b>Nothing in the queue</b>Orders placed by the desk arrive here.</div>';
+
+    var head='<div class="panel"><div class="ph"><div><h2>My queue</h2>'+
+      '<p class="note">Your side of the same data. One click moves a file forward and everyone sees it.</p></div></div>'+
+      '<div class="pb"><div class="stack-s">'+cards+'</div></div></div>';
+    if(!o) return head;
+
+    var acts=[];
+    if(o.declined){
+      return head+'<div class="panel"><div class="ph"><div><h2>'+esc(o.addr)+'</h2></div>'+pill(o)+'</div>'+
+        '<div class="pb"><div class="callout"><b>You declined this order.</b> Reason: '+esc(o.declinedReason||"not stated")+
+        '. The desk has been told. Nothing was sent to the borrower.</div></div></div>';
+    }
+    if(o.hold){
+      return head+'<div class="panel"><div class="ph"><div><h2>'+esc(o.addr)+'</h2>'+
+        '<p class="note mono sm">'+esc(o.id.slice(0,10))+' &middot; '+esc(o.type)+'</p></div>'+pill(o)+'</div>'+
+        '<div class="pb"><div class="stack">'+
+        '<div class="callout"><b>This file is on hold.</b> Reason: '+esc(o.holdReason||"not stated")+
+        '. Release the hold before moving it forward, so the release lands in the log and the borrower stops seeing the hold notice.</div>'+
+        '<div class="row"><button class="btn btn-p" data-adv="hold" data-from="'+o.step+'">Release hold</button></div>'+
+        timelineHtml(o)+'</div></div></div>';
+    }
+    if(o.step===0){ acts.push(["accept","Accept order",1]); acts.push(["decline","Decline",0]); }
+    if(o.step===1) acts.push(["schedule","Send scheduling request",1]);
+    if(o.step===2) acts.push(["renotify","Resend scheduling link",0]);
+    if(o.step===3) acts.push(["inspect","Log inspection complete",1]);
+    if(o.step===4) acts.push(["review","Move to in review",1]);
+    if(o.step===5) acts.push(["deliver","Deliver report",1]);
+    if(o.step===6) acts.push(["invoice","Send invoice",1]);
+    acts.push(["hold",o.hold?"Release hold":"Place on hold",0]);
+
+    return head+'<div class="panel"><div class="ph"><div><h2>'+esc(o.addr)+'</h2>'+
+      '<p class="note mono sm">'+esc(o.id.slice(0,10))+' &middot; '+esc(o.type)+' &middot; '+(o.fee?("$"+Number(o.fee).toLocaleString()):"fee not set")+'</p></div>'+pill(o)+'</div>'+
+      '<div class="detail"><div class="dm"><div class="stack">'+
+        '<div><p class="lbl" style="margin-bottom:7px">Advance this file</p><div class="row">'+
+        acts.map(function(a){return '<button class="btn '+(a[2]?"btn-p":"")+'" data-adv="'+a[0]+'" data-from="'+o.step+'">'+esc(a[1])+'</button>';}).join("")+
+        '</div></div>'+
+        (o.step===5?'<label class="f">Report and invoice<button type="button" class="drop" style="margin-top:4px"><b>Upload the finished report</b><span>PDF. Delivering without a document is allowed on the pilot.</span><input type="file" class="vh" multiple accept=".pdf,.png,.jpg,.jpeg,.csv,.txt"></button></label>':"")+
+        timelineHtml(o)+
+      '</div></div>'+
+      '<div class="ds"><div class="stack">'+
+        '<dl class="kv">'+
+          '<dt>Access</dt><dd>'+esc(o.accessVia||"Borrower")+'</dd>'+
+          '<dt>Borrower</dt><dd>'+esc(o.borrowerName||"")+(o.borrowerPhone?'<br><span class="mono sm">'+esc(o.borrowerPhone)+'</span>':"")+'</dd>'+
+          '<dt>Agent</dt><dd>'+esc(o.agentName||"None")+'</dd>'+
+          (o.apptStart?'<dt>Inspection</dt><dd>'+esc(fmtDay(o.apptStart))+', '+esc(fmtHr(o.apptStart))+'</dd>':"")+
+        '</dl>'+
+        (o.notes?'<div class="msg"><b>Notes from the desk</b>'+esc(o.notes)+'</div>':"")+
+        '<div><p class="lbl" style="margin-bottom:7px">Documents</p>'+docsHtml(o,!!assets)+'</div>'+
+      '</div></div></div></div>';
+  }
+
+  function availHtml(){
+    var c=S.config||defaultConfig();
+    var dayNames=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    var slots=genSlots(5);
+    return '<div class="panel"><div class="ph"><div><h2>Appraiser settings</h2>'+
+      '<p class="note">How you appear to borrowers and agents, and the rules that generate the times they are offered. Nothing inside the lead time is ever shown.</p></div>'+
+      '<button class="btn btn-p btn-s" data-a="saveavail">Save</button></div>'+
+      '<div class="pb"><div class="stack">'+
+      '<div><p class="lbl" style="margin-bottom:7px">How you appear to borrowers and agents</p>'+
+      '<div class="grid2">'+
+        '<label class="f">Name shown on messages<input id="c_aname" placeholder="Leave blank to show \'your appraiser\'" value="'+esc((c.appraiserName||""))+'"></label>'+
+        '<label class="f">Callback number<input id="c_aphone" placeholder="Leave blank to point them at the bank" value="'+esc((c.appraiserPhone||""))+'"></label>'+
+      '</div>'+
+      '<p class="sm muted" style="margin-top:7px">First Security Bank is always the sender. This is the person a borrower reaches about access and timing.</p></div>'+
+      '<div><p class="lbl" style="margin-bottom:7px">Days worked</p><div class="row">'+
+      dayNames.map(function(n,i){
+        var on=(c.days||[]).indexOf(i)>-1;
+        return '<button class="btn btn-s'+(on?" btn-p":"")+'" data-day="'+i+'">'+n+'</button>';
+      }).join("")+'</div></div>'+
+      '<div class="grid3">'+
+        '<label class="f">Day starts<input id="c_start" type="number" step="0.5" min="5" max="12" value="'+esc(c.startHour)+'"></label>'+
+        '<label class="f">Day ends<input id="c_end" type="number" step="0.5" min="12" max="21" value="'+esc(c.endHour)+'"></label>'+
+        '<label class="f">Inspection length, minutes<input id="c_slot" type="number" step="15" min="15" max="240" value="'+esc(c.slotMinutes)+'"></label>'+
+      '</div>'+
+      '<div class="grid2">'+
+        '<label class="f">Travel buffer, minutes<input id="c_buf" type="number" step="15" min="0" max="180" value="'+esc(c.bufferMinutes)+'"></label>'+
+        '<label class="f">Earliest booking, hours from now<input id="c_lead" type="number" step="1" min="0" max="168" value="'+esc(c.leadHours)+'"></label>'+
+      '</div>'+
+      '<div class="callout nav"><b>Next five slots these rules produce</b>'+
+      (slots.length? slots.map(function(s){return fmtDay(s)+", "+fmtHr(s);}).join(" &middot; ") : "None. Widen the days or hours.")+
+      '</div></div></div></div>';
+  }
+
+  function slotCal(){
+    var slots=genSlots(12), days=[], map={};
+    slots.forEach(function(iso){
+      var k=new Date(iso).toDateString();
+      if(!map[k]){ map[k]=[]; days.push(k); }
+      map[k].push(iso);
+    });
+    if(!days.length) return '<p class="sm muted">No times are open right now. Use the button below and the appraiser will call you.</p>';
+    return days.slice(0,5).map(function(k){
+      return '<div class="calday"><p class="lbl">'+esc(fmtDay(map[k][0]))+'</p><div class="caltimes">'+
+        map[k].map(function(iso){
+          return '<button class="slot slot-t" data-slot="'+esc(iso)+'">'+esc(fmtHr(iso))+'</button>';
+        }).join("")+'</div></div>';
+    }).join("");
+  }
+
+  function clientPageHtml(){
+    if(!ready && S.conn==="connecting"){
+      return '<div class="clientwrap"><div class="panel"><div class="empty"><b>Loading your appraisal</b>One moment.</div></div></div>';
+    }
+    var o=current();
+    if(!o){
+      return '<div class="clientwrap"><div class="panel"><div class="empty">'+
+        '<b>This link is not valid</b>It may have expired, or the file may be closed. '+
+        'Call your loan officer at First Security Bank and they can send you a new one.</div></div></div>';
+    }
+    var isAgent = (o.tokA===S.token);
+    var who = isAgent ? (o.agentName||"the listing agent") : (o.borrowerName||"you");
+
+    var vst=STEPS.map(function(st,i){
+      var cls=i<o.step?"done":(i===o.step?"now":"");
+      return '<li class="'+cls+'"><span class="nd">'+(i<o.step?"&#10003;":"")+'</span><span class="t">'+esc(CLIENT_LABEL[st])+'</span></li>';
+    }).join("");
+
+    var action;
+    if(o.declined){
+      action='<div class="nextc"><h4>On hold with the bank</h4><p>First Security Bank is arranging your appraisal. Nothing is needed from you right now.</p></div>';
+    } else if(o.hold){
+      action='<div class="nextc"><h4>Waiting on property access</h4><p>'+esc(aprCap())+' needs access arranged before the inspection can happen. Nothing is needed from you right now.</p></div>';
+    } else if(o.step===2){
+      action='<div class="stack-s"><h4 class="calhead">Choose your inspection time</h4>'+
+        '<p class="sm muted" style="margin-bottom:2px">About '+esc(slotMin())+' minutes. Pick whatever suits you.</p>'+
+        slotCal()+
+        '<button class="btn btn-s" data-a="noslot" style="margin-top:8px">None of these work for me</button></div>';
+    } else if(o.step===3){
+      action='<div class="nextc"><h4>Your inspection is booked</h4>'+
+        '<p class="mono" style="color:var(--ink);font-weight:700;font-size:14px;margin:5px 0 7px">'+esc(fmtDay(o.apptStart))+', '+esc(fmtHr(o.apptStart))+'</p>'+
+        '<p>'+esc(aprCap())+' will need to see every room, the basement, the attic access and the garage, and will photograph each room. About '+esc(slotMin())+' minutes.</p>'+
+        '<p class="sm muted" style="margin-top:7px">This is not a home inspection, and nothing needs tidying. It does not affect the value.</p>'+
+        '<div class="row" style="margin-top:10px"><button class="btn btn-s" data-a="reschedule">Change this time</button></div></div>';
+    } else if(o.step>=6){
+      var rep=(o.docs||[]).filter(function(d){ return d.kind==="report"; });
+      action='<div class="nextc"><h4>Your appraisal is ready</h4><p>A copy has been sent to you at no charge.</p>'+
+        (rep.length?'<div style="margin-top:10px"><button class="btn btn-p btn-s" data-dl="'+esc(rep[0].assetId)+'" data-dlname="'+esc(rep[0].name)+'">Download my copy</button></div>'
+                   :'<p class="sm muted" style="margin-top:8px">No file is attached to this pilot order.</p>')+'</div>';
+    } else if(o.step<=1){
+      action='<div class="nextc"><h4>Nothing to do yet</h4><p>'+esc(aprCap())+' will send a link to choose an inspection time. You will get a text and an email.</p></div>';
+    } else {
+      action='<div class="nextc"><h4>Nothing to do right now</h4><p>Your report is being prepared. You will hear from First Security Bank when it is delivered.</p></div>';
+    }
+
+    return '<div class="clientwrap">'+
+      '<div class="panel"><div class="pb">'+
+        '<p class="lbl">Appraisal status'+(isAgent?' &middot; listing agent':'')+'</p>'+
+        '<h2 style="font-size:19px;margin-top:3px">'+esc(o.addr)+'</h2>'+
+        '<p class="sm muted">'+esc(o.city)+'</p>'+
+        '<ul class="vst" style="margin-top:14px">'+vst+'</ul>'+
+        '<div style="margin-top:14px">'+action+'</div>'+
+        '<p class="sm muted" style="margin-top:16px;line-height:1.5">'+esc(aprContact())+
+        ' This link is personal to '+esc(who)+' and stops working when the file closes.</p>'+
+      '</div></div>'+
+      '<p class="sm muted" style="text-align:center;margin-top:12px">First Security Bank &middot; Mackinaw, Heritage Lake, Deer Creek, Danvers</p>'+
+    '</div>';
+  }
+
+  function outboxHtml(){
+    var any=S.orders.some(function(o){return (o.outbox||[]).length;});
+    return '<div class="panel"><div class="ph"><div><h2>Outbox</h2>'+
+      '<p class="note">Nothing is actually sent on the pilot. Every email and text the system would send is written here with its real wording, so you can tell us what to change before we turn sending on.</p></div>'+
+      '<span class="pill wait">Not sending</span></div>'+
+      '<div class="pb">'+(any? '<div class="stack">'+S.orders.filter(function(o){return (o.outbox||[]).length;}).map(function(o){
+        return '<div><p class="lbl" style="margin-bottom:7px">'+esc(o.addr)+'</p><div class="stack-s">'+outboxRows(o)+'</div></div>';
+      }).join("")+'</div>' : '<div class="empty"><b>Nothing queued yet</b>Place an order or send a scheduling request and the messages appear here.</div>')+
+      '<div class="callout" style="margin-top:14px"><b>Why texting is not live yet</b>US carriers require A2P 10DLC brand and campaign registration before an application can send SMS reliably. Registration takes a few weeks, so it runs in parallel with the build rather than at the end.</div>'+
+      '</div></div>';
+  }
+
+  function feedbackHtml(){
+    var items=S.feedback.slice().sort(function(a,b){return b.at<a.at?-1:1;});
+    return '<div class="panel"><div class="ph"><div><h2>Feedback</h2>'+
+      '<p class="note">Everything anyone has flagged, newest first. Use the red button on any screen to add to it.</p></div>'+
+      '<button class="btn btn-p btn-s" data-a="openfb">Add feedback</button></div>'+
+      '<div class="pb">'+(items.length? '<div class="stack-s">'+items.map(function(f){
+        return '<div class="msg'+(f.kind==="Bug"?" sms":"")+'"><b>'+esc(f.kind)+' &middot; '+esc(f.screen)+' &middot; '+esc(f.who)+' &middot; '+esc(fmtTime(f.at))+'</b>'+esc(f.text)+'</div>';
+      }).join("")+'</div>' : '<div class="empty"><b>No feedback yet</b>That is what this pilot is for. Say what is wrong, what is missing, and what you would never use.</div>')+'</div></div>';
+  }
+
+  function connBanner(){
+    if(S.conn==="live") return "";
+    if(S.conn==="connecting"){
+      return '<div class="panel" style="margin-bottom:14px"><div class="pb" style="padding:12px 16px">'+
+        '<p class="sm"><b>Connecting to the shared database.</b> You can keep working. Anything you do before this finishes stays on this device.</p></div></div>';
+    }
+    return '<div class="panel" style="margin-bottom:14px"><div class="pb" style="padding:13px 16px">'+
+      '<div class="row" style="justify-content:space-between">'+
+      '<p class="sm" style="max-width:62ch"><b>Local only.</b> '+esc(S.connWhy||"This view cannot reach the shared database.")+
+      ' Everything still works so you can click through and leave feedback, but nothing is saved or visible to anyone else, and uploads are off.</p>'+
+      '<button class="btn btn-s" data-a="retry">Try again</button></div></div></div>';
+  }
+
+  /* ---------- render ---------- */
+  function render(){
+    var stage=document.getElementById("stage");
+    var nav=document.getElementById("views");
+    var who=document.getElementById("whochip");
+    var fbtn=document.getElementById("fbtn");
+
+    var band=document.querySelector(".band");
+    var topbar=document.querySelector("header.top");
+    var mast=document.querySelector(".mast");
+    var foot=document.querySelector("footer");
+
+    if(S.token){
+      if(band) band.hidden=true;
+      if(mast) mast.hidden=true;
+      if(foot) foot.hidden=true;
+      nav.innerHTML="";
+      who.innerHTML="";
+      fbtn.hidden=true;
+      stage.innerHTML=clientPageHtml();
+      return;
+    }
+    if(band) band.hidden=false;
+    if(mast) mast.hidden=false;
+    if(foot) foot.hidden=false;
+
+    if(!S.me){
+      nav.innerHTML=navHtml(); who.innerHTML="";
+      fbtn.hidden=true;
+      stage.innerHTML=identityHtml();
+      var rs=document.getElementById("meRole");
+      if(rs) rs.addEventListener("change",function(){
+        var h=document.getElementById("roleHint");
+        if(h) h.innerHTML='<b>'+esc(ROLES[rs.value].name)+'</b>'+esc(ROLES[rs.value].hint);
+      });
+      return;
+    }
+
+    fbtn.hidden=false;
+    var liveLabel = window.__FSB_STATIC__ ? "Demo, this browser" : "Live, shared";
+    var cs={connecting:["off","Connecting"],live:["",liveLabel],local:["off","Local only"]}[S.conn]||["off","Offline"];
+    who.innerHTML='<span class="chip"><span class="dot '+cs[0]+'"></span>'+esc(cs[1])+'</span>'+
+      '<button class="chip act" data-a="signout" title="Sign out or change role"><b>'+esc(S.me.name)+'</b> &middot; '+esc((ROLES[S.me.role]||{}).name||S.me.role)+'</button>';
+    nav.innerHTML=navHtml();
+
+    var canWrite = S.me.role==="desk";
+    var v=S.view, html=connBanner();
+
+    if(v==="feedback") html+=feedbackHtml();
+    else if(v==="outbox") html+=outboxHtml();
+    else if(v==="new") html+=newOrderHtml();
+    else if(v==="avail") html+=availHtml();
+    else if(v==="queue") html+=queueHtml();
+    else if(v==="people") html+=peopleHtml();
+    else {
+      var ro = S.me.role!=="desk";
+      html+=boardHtml(ro);
+      var o=current();
+      if(o) html+=detailHtml(o,canWrite);
+    }
+    var keep={}, focusId=null, selStart=null, selEnd=null;
+    try{
+      var ae=document.activeElement;
+      if(ae&&ae.id&&stage.contains(ae)){
+        focusId=ae.id;
+        if(ae.selectionStart!=null){ selStart=ae.selectionStart; selEnd=ae.selectionEnd; }
+      }
+      stage.querySelectorAll("input,select,textarea").forEach(function(el){
+        if(!el.id) return;
+        keep[el.id] = (el.type==="checkbox"||el.type==="radio") ? el.checked : el.value;
+      });
+    }catch(e){}
+
+    stage.innerHTML=html;
+
+    try{
+      Object.keys(keep).forEach(function(id){
+        var el=stage.querySelector("#"+CSS.escape(id));
+        if(!el) return;
+        if(el.type==="checkbox"||el.type==="radio") el.checked=keep[id];
+        else if(keep[id]!=="") el.value=keep[id];
+      });
+      if(focusId){
+        var f=stage.querySelector("#"+CSS.escape(focusId));
+        if(f){ f.focus(); if(selStart!=null&&f.setSelectionRange) try{ f.setSelectionRange(selStart,selEnd); }catch(e2){} }
+      }
+    }catch(e){}
+
+    wireDrop();
+    var cp=document.getElementById("clientPick");
+    if(cp) cp.addEventListener("change",function(){ S.sel=cp.value; render(); });
+  }
+
+  /* ---------- uploads ---------- */
+  function wireDrop(){
+    document.querySelectorAll(".drop").forEach(function(drop){
+      var input=drop.querySelector('input[type="file"]');
+      if(!input) return;
+      drop.addEventListener("click",function(e){ if(e.target!==input) input.click(); });
+      input.addEventListener("change",function(){ handleFiles(input.files); input.value=""; });
+      ["dragenter","dragover"].forEach(function(t){ drop.addEventListener(t,function(e){e.preventDefault();drop.classList.add("over");}); });
+      ["dragleave","drop"].forEach(function(t){ drop.addEventListener(t,function(e){e.preventDefault();drop.classList.remove("over");}); });
+      drop.addEventListener("drop",function(e){ if(e.dataTransfer&&e.dataTransfer.files) handleFiles(e.dataTransfer.files); });
+    });
+  }
+  var TYPE_BY_EXT={pdf:"application/pdf",png:"image/png",jpg:"image/jpeg",jpeg:"image/jpeg",webp:"image/webp",
+    csv:"text/csv",txt:"text/plain",md:"text/markdown",json:"application/json"};
+  function handleFiles(files){
+    var o=current();
+    if(!o){ toast("Open an order first."); return; }
+    if(!assets){ toast("This view cannot upload files. Ask the administrator for edit access."); return; }
+    var list=Array.prototype.slice.call(files||[]);
+    if(!list.length) return;
+    toast("Uploading "+list.length+" file"+(list.length===1?"":"s")+".");
+    var chain=Promise.resolve(), okN=0, failN=0;
+    list.forEach(function(f){
+      chain=chain.then(function(){
+        var ext=(f.name.split(".").pop()||"").toLowerCase();
+        var type=TYPE_BY_EXT[ext];
+        if(!type){ failN++; toast("<b>"+esc(f.name)+"</b> is not a supported type on the pilot."); return null; }
+        return assets.upload(f,{type:type}).then(function(r){
+          var fresh=byId(o.id)||o;
+          (fresh.docs=fresh.docs||[]).push({
+            assetId:r.id,name:f.name,size:r.sizeBytes,type:r.contentType,
+            by:S.me.name,at:nowISO(),kind:(fresh.step>=5?"report":"intake")
+          });
+          evt(fresh,"Uploaded "+f.name+" ("+kb(r.sizeBytes)+").");
+          return save(fresh).then(function(){ okN++; });
+        }).catch(function(e){
+          failN++;
+          var c=(e&&e.code)||"";
+          if(c==="too_large") toast("<b>"+esc(f.name)+"</b> is over the 20 MB limit.");
+          else if(c==="unsupported_type") toast("<b>"+esc(f.name)+"</b> is not a supported type.");
+          else if(c==="quota_or_state") toast("Pilot storage is full. Tell the administrator.");
+          else toast("Upload failed for <b>"+esc(f.name)+"</b>.");
+          return null;
+        });
+      });
+    });
+    chain.then(function(){
+      if(okN&&!failN) toast(okN+" file"+(okN===1?"":"s")+" attached.");
+      else if(okN&&failN) toast("<b>"+okN+" attached, "+failN+" failed.</b>");
+      else toast("<b>Nothing was uploaded.</b>");
+    }).catch(function(){ toast("<b>Nothing was uploaded.</b>"); });
+  }
+
+  function download(assetId,name){
+    if(!downloads){ toast("Downloads are not available in this view."); return; }
+    fetch("/_blob/"+assetId).then(function(r){
+      if(!r.ok) throw new Error("missing");
+      return r.blob();
+    }).then(function(b){
+      return downloads.save({filename:name,data:b});
+    }).then(function(){ toast("Saved."); })
+    .catch(function(e){
+      var c=(e&&e.code)||"";
+      if(c==="declined") return;
+      if(c==="rejected_extension") toast("That file type cannot be downloaded here.");
+      else toast("Could not download that file.");
+    });
+  }
+
+  /* ---------- actions ---------- */
+  function advance(o,a){
+    var c=S.config||defaultConfig();
+    if(a==="hold"){
+      if(!o.hold){
+        var why=prompt("Why is this file on hold? The bank sees this reason.");
+        if(why===null) return;
+        o.hold=true; o.holdReason=(why||"Not stated").slice(0,400);
+        evt(o,"Placed on hold: "+o.holdReason);
+        out(o,"Email","Appraisal desk","Appraisal on hold: "+o.addr,
+          "The appraisal at "+o.addr+" is on hold. Reason: "+o.holdReason+". No action is needed from the borrower. "+aprSig());
+      } else {
+        o.hold=false; o.holdReason="";
+        evt(o,"Hold released.");
+        out(o,"Email","Appraisal desk","Appraisal resumed: "+o.addr,
+          "The appraisal at "+o.addr+" is off hold and moving again.");
+      }
+      return save(o,o.hold?"On hold. <b>The bank was notified with the reason.</b>":"Hold released.");
+    }
+    if(a==="decline"){
+      var dw=prompt("Why are you declining? The desk sees this so they can re-route it today.");
+      if(dw===null) return Promise.resolve();
+      o.declined=true; o.declinedReason=(dw||"Not stated").slice(0,400);
+      evt(o,"Order DECLINED: "+o.declinedReason);
+      out(o,"Email","Appraisal desk","Appraisal declined: "+o.addr,
+        "The appraiser declined the order at "+o.addr+". Reason: "+o.declinedReason+
+        ". Nothing has been sent to the borrower. Re-route this file today.");
+      return save(o,"Declined. <b>The desk was told, and the borrower was not contacted.</b>");
+    }
+    if(a==="renotify"){
+      out(o,"SMS",o.borrowerName||"Borrower",
+        "","Reminder: time to schedule your appraisal inspection at "+o.addr+". Pick a time: [link]."+qLine());
+      evt(o,"Scheduling link resent.");
+      return save(o,"Link resent. <b>See the Outbox tab for the wording.</b>");
+    }
+    if(o.step>=STEPS.length-1) return Promise.resolve();
+
+    o.step+=1;
+    var msg="Status updated.";
+    if(a==="accept"){
+      if(!o.fee){ var f=prompt("Fee for this assignment?"); if(f) o.fee=Number(f)||0; }
+      evt(o,"Order accepted."+(o.fee?(" Fee $"+o.fee+"."):""));
+      out(o,"Email","Appraisal desk","Appraisal accepted: "+o.addr,
+        aprCap()+" has accepted the appraisal at "+o.addr+(o.fee?(" at $"+o.fee):"")+(o.due?(", due "+fmtDate(o.due)):"")+". You will be notified as the file moves.");
+      out(o,"SMS",o.borrowerName||"Borrower","",
+        "First Security Bank has ordered an appraisal for "+o.addr+"."+assignedLine()+" Track it here: [link]. Reply STOP to opt out.");
+      msg="Accepted. <b>The desk sees it immediately.</b>";
+    } else if(a==="schedule"){
+      var to=(o.accessVia==="Agent"&&o.agentName)?o.agentName:(o.borrowerName||"Borrower");
+      evt(o,"Scheduling request sent to "+to+".");
+      out(o,"SMS",to,"","Time to schedule your appraisal inspection at "+o.addr+". Pick a time that works: [link]. Takes about "+c.slotMinutes+" minutes."+qLine());
+      out(o,"Email",to,"Schedule your appraisal inspection: "+o.addr,
+        "Your appraisal inspection at "+o.addr+" is ready to be scheduled. Choose a time that works for you: [link]. The inspection takes about "+c.slotMinutes+" minutes and "+aprLower()+" will need access to every room, the basement and the garage. "+aprSig());
+      msg="Scheduling request sent. <b>Copy the client link from the order to see what they see.</b>";
+    } else if(a==="inspect"){
+      evt(o,"Inspection complete.");
+      out(o,"Email","Appraisal desk","Inspection complete: "+o.addr,"The inspection at "+o.addr+" is complete. The report is now in preparation.");
+      msg="Inspection logged.";
+    } else if(a==="review"){
+      evt(o,"Moved to in review."); msg="Moved to in review.";
+    } else if(a==="deliver"){
+      evt(o,"Report delivered to the client.");
+      out(o,"Email","Appraisal desk","Appraisal delivered: "+o.addr,"The appraisal report for "+o.addr+" has been delivered through the portal and is available to download.");
+      out(o,"Email",o.borrowerName||"Borrower","Your appraisal copy: "+o.addr,
+        "A copy of the appraisal for "+o.addr+" is available to you at no charge: [link]. You are receiving this electronically because you consented to electronic delivery. To receive a paper copy instead at no charge, reply to this message.");
+      evt(o,"Borrower copy issued. E-SIGN consent required before electronic delivery counts as delivery.");
+      msg="Delivered. <b>Borrower copy issued and logged.</b>";
+    } else if(a==="invoice"){
+      evt(o,"Invoice sent"+(o.fee?(", $"+o.fee):"")+".");
+      out(o,"Email","Appraisal desk","Invoice: "+o.addr,"Invoice for the appraisal at "+o.addr+(o.fee?(" in the amount of $"+o.fee):"")+" is attached in the portal. "+aprSig());
+      msg="Invoice sent. File complete.";
+    }
+    return save(o,msg);
+  }
+
+  function createOrder(){
+    var g=function(id){var e=document.getElementById(id);return e?e.value.trim():"";};
+    var addr=g("n_addr");
+    if(!addr){ toast("A property address is required."); return; }
+    if(!document.getElementById("n_att").checked){ toast("The recusal attestation is required before an order can be placed."); return; }
+    var o={
+      id:uid(), tokB:tok(), tokA:tok(), addr:addr, city:g("n_city"), loan:g("n_loan"),
+      type:g("n_type")||"1004 URAR", purpose:g("n_purpose"), due:g("n_due"),
+      fee:Number(g("n_fee"))||0, rush:g("n_rush")==="Yes",
+      borrowerName:g("n_bname"), borrowerPhone:g("n_bphone"), borrowerEmail:g("n_bemail"),
+      agentName:g("n_aname"), agentPhone:g("n_aphone"), accessVia:g("n_access"),
+      notes:g("n_notes").slice(0,2000),
+      step:0, hold:false, holdReason:"",
+      orderedBy:S.me.name, orderedByRole:ROLES[S.me.role].name, orderedAt:nowISO(),
+      attestation:true, docs:[], log:[], outbox:[],
+      createdAt:nowISO(), updatedAt:nowISO()
+    };
+    evt(o,"Order created. Recusal attestation recorded.");
+    out(o,"Email","Appraiser","New appraisal order: "+addr,
+      "First Security Bank has placed an order for "+addr+". Type: "+o.type+". Purpose: "+o.purpose+(o.due?(". Due: "+fmtDate(o.due)):"")+". Open it in the portal to accept or decline.");
+    S.sel=o.id;
+    save(o).then(function(){ S.view="board"; S.tab="docs"; render(); toast("Order placed. <b>Upload the contract on the Documents tab.</b>"); });
+  }
+
+  function pickSlot(iso){
+    var o=current(); if(!o) return;
+    var slotM=slotMin(), bufM=cfgNum("bufferMinutes",45);
+    var want=new Date(iso).getTime(), blockMs=(slotM+bufM)*60e3;
+    for(var bi=0;bi<S.orders.length;bi++){
+      var other=S.orders[bi];
+      if(other.id===o.id||!other.apptStart) continue;
+      if(Math.abs(new Date(other.apptStart).getTime()-want)<blockMs){
+        toast("<b>That time was just taken.</b> Here are the next ones.");
+        render(); return;
+      }
+    }
+    o.apptStart=iso;
+    o.apptEnd=new Date(want+slotM*60e3).toISOString();
+    o.step=Math.max(o.step,3);
+    var who=(o.accessVia==="Agent"&&o.agentName)?o.agentName:(o.borrowerName||"Borrower");
+    evt(o,"Inspection booked for "+fmtDay(iso)+", "+fmtHr(iso)+".");
+    out(o,"SMS",who,"","Confirmed: your appraisal inspection at "+o.addr+" is "+fmtDay(iso)+" at "+fmtHr(iso)+". "+aprSig());
+    out(o,"Email","Appraisal desk","Inspection scheduled: "+o.addr,"The inspection at "+o.addr+" is scheduled for "+fmtDay(iso)+" at "+fmtHr(iso)+".");
+    save(o,"Booked for "+esc(fmtDay(iso))+", "+esc(fmtHr(iso))+". <b>The board already shows Scheduled.</b>");
+  }
+
+  function exportLog(){
+    var o=current(); if(!o) return;
+    if(!downloads){ toast("Downloads are not available in this view."); return; }
+    var L=[];
+    L.push("APPRAISER INDEPENDENCE LOG");
+    L.push("");
+    L.push("Property: "+o.addr+", "+o.city);
+    L.push("Order: "+o.id);
+    L.push("Loan number: "+(o.loan||"not provided"));
+    L.push("Report type: "+o.type+", "+o.purpose);
+    L.push("Client: First Security Bank, Mackinaw, Illinois");
+    L.push("Appraiser: "+((S.config&&S.config.appraiserName)||"not recorded"));
+    L.push("Exported: "+new Date().toString());
+    L.push("");
+    L.push("ORDERING AND RECUSAL");
+    L.push("Ordered by: "+o.orderedBy+" ("+o.orderedByRole+")");
+    L.push("Ordered at: "+o.orderedAt);
+    L.push("Recusal attestation: "+(o.attestation?"RECORDED":"NOT RECORDED"));
+    L.push('Attested text: "I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction."');
+    L.push("Intended control reference: 12 CFR 1026.42(d)(3)(ii); Interagency Appraisal and Evaluation Guidelines, 2010.");
+    L.push("");
+    L.push("PILOT NOTICE: identities in this record are self-declared and are not authenticated.");
+    L.push("This export shows the format only. It is not evidence of a control until identities are verified.");
+    L.push("");
+    L.push("DOCUMENTS");
+    (o.docs||[]).forEach(function(d){ L.push("  "+d.at+"  "+d.name+"  ("+kb(d.size)+")  uploaded by "+d.by); });
+    if(!(o.docs||[]).length) L.push("  none");
+    L.push("");
+    L.push("ACTIVITY, APPEND ONLY");
+    (o.log||[]).forEach(function(e){ L.push("  "+e.t+"  "+e.who+"  "+e.what); });
+    L.push("");
+    L.push("MESSAGES ISSUED");
+    (o.outbox||[]).forEach(function(m){ L.push("  "+m.t+"  "+m.channel+" to "+m.to+(m.subject?("  subject: "+m.subject):"")); L.push("      "+m.body); });
+    if(!(o.outbox||[]).length) L.push("  none");
+    L.push("");
+    L.push("Generated by the FSB Appraisal Desk pilot. Test data.");
+    downloads.save({filename:"independence-log-"+o.id.slice(0,10)+".txt",data:L.join("\n")})
+      .then(function(){ toast("Exported."); })
+      .catch(function(e){ if((e&&e.code)!=="declined") toast("Export failed."); });
+  }
+
+  function saveAvail(){
+    var g=function(id){var e=document.getElementById(id);return e?Number(e.value):0;};
+    var t=function(id){var e=document.getElementById(id);return e?e.value.trim():"";};
+    var c=S.config||defaultConfig();
+    c.startHour=g("c_start")||8.5; c.endHour=g("c_end")||16;
+    c.slotMinutes=g("c_slot")||60; c.bufferMinutes=g("c_buf"); c.leadHours=g("c_lead");
+    c.appraiserName=t("c_aname"); c.appraiserPhone=t("c_aphone");
+    if(!db){ toast("Not connected."); return; }
+    db.doc("config/availability").set(c).then(function(){ S.config=c; render(); toast("Availability saved."); })
+      .catch(function(e){ toast(esc(dbErr(e))); });
+  }
+
+  function personSheet(id){
+    var r=id?rosterById(id):null;
+    var opts=Object.keys(ROLES).map(function(k){
+      return '<option value="'+k+'"'+((r&&r.role===k)?" selected":"")+'>'+esc(ROLES[k].name)+'</option>';
+    }).join("");
+    var hints=Object.keys(ROLES).map(function(k){
+      return '<li><b>'+esc(ROLES[k].name)+'</b> '+esc(ROLES[k].hint)+'</li>';
+    }).join("");
+    return '<div class="sheet" data-a="closesheet"><div class="sheetc" data-stop="1"><div class="stack">'+
+      '<div><h2 style="font-size:17px">'+(r?"Change access":"Add someone")+'</h2>'+
+      '<p class="sm muted" style="margin-top:3px">They still have to be signed in to Claude to open this page. This decides what they may do once inside.</p></div>'+
+      '<input type="hidden" id="p_id" value="'+esc(r?r.id:"")+'">'+
+      '<label class="f">Name<input id="p_name" value="'+esc(r?r.name:"")+'" autocomplete="off"></label>'+
+      '<label class="f">Work email<input id="p_email" type="email" value="'+esc(r?(r.email||""):"")+'" autocomplete="off"></label>'+
+      '<label class="f">Role<select id="p_role">'+opts+'</select></label>'+
+      '<ul class="rolehints">'+hints+'</ul>'+
+      '<div class="row"><button class="btn btn-p" data-a="saveperson">'+(r?"Save":"Add")+'</button>'+
+      '<button class="btn" data-a="closesheet">Cancel</button></div>'+
+      '</div></div></div>';
+  }
+
+  function feedbackSheet(){
+    var screens={board:"Order board",new:"New order",queue:"Appraiser queue",avail:"Availability",client:"Borrower view",outbox:"Outbox",feedback:"Feedback"};
+    return '<div class="sheet" data-a="closesheet"><div class="sheetc" data-stop="1"><div class="stack">'+
+      '<div><h2 style="font-size:17px">Tell us what is wrong</h2>'+
+      '<p class="sm muted" style="margin-top:3px">Be blunt. "I would never use this" is the most useful thing you can write.</p></div>'+
+      '<label class="f">What kind<select id="fb_kind"><option>Missing something</option><option>Confusing</option><option>Bug</option><option>Would not use</option><option>Idea</option></select></label>'+
+      '<label class="f">Your note<textarea id="fb_text" placeholder="What were you trying to do, and what got in the way?"></textarea></label>'+
+      '<p class="sm muted">Recorded against: <b>'+esc(screens[S.view]||S.view)+'</b>'+(current()?(" &middot; "+esc(current().addr)):"")+'</p>'+
+      '<div class="row"><button class="btn btn-p" data-a="sendfb">Send</button><button class="btn" data-a="closesheet">Cancel</button></div>'+
+      '</div></div></div>';
+  }
+  function sendFeedback(){
+    var kind=document.getElementById("fb_kind").value;
+    var text=document.getElementById("fb_text").value.trim();
+    if(!text){ toast("Write a note first."); return; }
+    if(!db){ toast("Not connected."); return; }
+    var rec={at:nowISO(),who:S.me.name,role:ROLES[S.me.role].name,kind:kind,
+      screen:S.view,order:current()?current().addr:"",text:text};
+    db.collection("feedback").add(rec).then(function(){
+      document.getElementById("modal").innerHTML="";
+      toast("Thank you. <b>It is on the Feedback tab.</b>");
+    }).catch(function(e){ toast(esc(dbErr(e))); });
+  }
+
+  /* ---------- events ---------- */
+  document.addEventListener("click",function(e){
+    var t=e.target.closest("[data-stop],[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-dl],[data-day],[data-role-id],[data-susp],[data-quick],[data-copy]");
+    if(t&&t.dataset.stop) return;
+    if(!t){
+      return;
+    }
+    var a=t.dataset.a;
+
+    if(t.dataset.v){ S.view=t.dataset.v; render(); return; }
+    if(t.dataset.open){ S.sel=t.dataset.open; S.tab="status"; render(); return; }
+    if(t.dataset.tab){ S.tab=t.dataset.tab; render(); return; }
+    if(t.dataset.slot){ pickSlot(t.dataset.slot); return; }
+    if(t.dataset.dl){ download(t.dataset.dl,t.dataset.dlname||"file"); return; }
+    if(t.dataset.day!==undefined){
+      var c=S.config||defaultConfig(); var d=Number(t.dataset.day);
+      c.days=c.days||[]; var i=c.days.indexOf(d);
+      if(i>-1) c.days.splice(i,1); else c.days.push(d);
+      S.config=c; render(); return;
+    }
+
+    if(a==="signin"){
+      var sn=((document.getElementById("meName")||{}).value||"").trim().slice(0,80);
+      var se=((document.getElementById("meEmail")||{}).value||"").trim().slice(0,120);
+      var sr=(document.getElementById("meRole")||{}).value||"desk";
+      if(!sn){ toast("Your name, please."); return; }
+      if(!ROLES[sr]) sr="desk";
+
+      var existing=null, key=sn.toLowerCase();
+      for(var ri=0;ri<S.roster.length;ri++){
+        var c=S.roster[ri];
+        if((c.name||"").toLowerCase()===key || (se && (c.email||"").toLowerCase()===se.toLowerCase())){ existing=c; break; }
+      }
+      if(existing && existing.active===false){
+        toast("<b>"+esc(existing.name)+"</b> has been suspended by the administrator."); return;
+      }
+
+      var id = existing ? existing.id : ("u"+tok());
+      var locked = !!(existing && existing.locked);
+      var role  = locked ? existing.role : sr;
+
+      S.me={id:id,name:sn,role:role};
+      lsSet("fsb.me",JSON.stringify(S.me));
+      S.view=homeFor(role);
+      render();
+      if(locked && role!==sr) toast("The administrator set you as <b>"+esc(ROLES[role].name)+"</b>, so that is what you get.");
+
+      if(db){
+        var body={id:id,name:sn,email:se||(existing&&existing.email)||"",role:role,active:true,lastSeen:nowISO()};
+        if(existing){ body.locked=!!existing.locked; body.addedBy=existing.addedBy; body.addedAt=existing.addedAt; }
+        else { body.locked=false; body.addedBy="self"; body.addedAt=nowISO(); }
+        db.doc("roster/"+id).set(body).catch(function(){});
+      }
+      return;
+    }
+    if(t.dataset.quick){
+      var qr=rosterById(t.dataset.quick);
+      if(!qr){ return; }
+      if(qr.active===false){ toast("That account is suspended."); return; }
+      S.me={id:qr.id,name:qr.name,role:qr.role};
+      lsSet("fsb.me",JSON.stringify(S.me));
+      S.view=homeFor(qr.role); render();
+      if(db) db.doc("roster/"+qr.id).update({lastSeen:nowISO()}).catch(function(){});
+      return;
+    }
+    if(a==="signout"){ S.me=null; lsSet("fsb.me",""); S.sel=null; render(); return; }
+    if(a==="addperson"){
+      if(!S.me||S.me.role!=="admin"){ toast("Only the administrator can add people."); return; }
+      document.getElementById("modal").innerHTML=personSheet(null); return;
+    }
+    if(t.dataset.roleId){
+      if(!S.me||S.me.role!=="admin"){ toast("Only the administrator can change roles."); return; }
+      document.getElementById("modal").innerHTML=personSheet(t.dataset.roleId); return;
+    }
+    if(t.dataset.susp){
+      if(!S.me||S.me.role!=="admin"){ toast("Only the administrator can do that."); return; }
+      var sr=rosterById(t.dataset.susp);
+      if(!sr||!db) return;
+      var nowActive=!(sr.active===false);
+      db.doc("roster/"+sr.id).update({active:!nowActive}).then(function(){
+        toast(nowActive?("<b>"+esc(sr.name)+"</b> can no longer sign in."):("<b>"+esc(sr.name)+"</b> restored."));
+      }).catch(function(e){ toast(esc(dbErr(e))); });
+      return;
+    }
+    if(a==="saveperson"){
+      if(!db){ toast("Not connected."); return; }
+      var pid=(document.getElementById("p_id")||{}).value||"";
+      var pn=((document.getElementById("p_name")||{}).value||"").trim().slice(0,80);
+      var pe=((document.getElementById("p_email")||{}).value||"").trim().slice(0,120);
+      var pr=(document.getElementById("p_role")||{}).value||"officer";
+      if(!pn){ toast("A name is required."); return; }
+      var id=pid||("u"+tok());
+      var prev=pid?rosterById(pid):null;
+      var body={id:id,name:pn,email:pe,role:pr,active:prev?(prev.active!==false):true,locked:true,
+                setBy:S.me.name,setAt:nowISO()};
+      if(!pid){ body.addedBy=S.me.name; body.addedAt=nowISO(); }
+      else { body.addedBy=prev&&prev.addedBy; body.addedAt=prev&&prev.addedAt; body.lastSeen=prev&&prev.lastSeen; }
+      db.doc("roster/"+id).set(body).then(function(){
+        document.getElementById("modal").innerHTML="";
+        toast("<b>"+esc(pn)+"</b> is locked to "+esc(ROLES[pr].name)+".");
+      }).catch(function(e){ toast(esc(dbErr(e))); });
+      return;
+    }
+    if(t.dataset.copy){
+      var link=t.dataset.copy;
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        navigator.clipboard.writeText(link).then(function(){ toast("Link copied."); })
+          .catch(function(){ window.prompt("Copy this link:",link); });
+      } else { window.prompt("Copy this link:",link); }
+      return;
+    }
+    if(a==="retry"){ connect(); return; }
+    if(a==="gonew"){ S.view="new"; render(); return; }
+    if(a==="goboard"){ S.view="board"; render(); return; }
+    if(a==="createorder"){ createOrder(); return; }
+    if(a==="saveavail"){ saveAvail(); return; }
+    if(a==="exportlog"){ exportLog(); return; }
+    if(a==="adv"){ return; }
+    if(a==="openfb"){ document.getElementById("modal").innerHTML=feedbackSheet(); return; }
+    if(a==="sendfb"){ sendFeedback(); return; }
+    if(a==="closesheet"){
+      if(t.dataset.stop) return;
+      document.getElementById("modal").innerHTML=""; return;
+    }
+    if(a==="reschedule"){
+      var o=current(); if(!o) return;
+      var had=o.apptStart;
+      o.step=2; o.apptStart=null; o.apptEnd=null;
+      evt(o,"Client asked to reschedule"+(had?(", cancelling "+fmtDay(had)+" at "+fmtHr(had)):"")+".");
+      out(o,"Email","Appraiser","Inspection cancelled: "+o.addr,
+        "The client cancelled the inspection at "+o.addr+(had?(" that was set for "+fmtDay(had)+" at "+fmtHr(had)):"")+
+        ". They have been asked to pick a new time. Do not drive to the property.");
+      out(o,"Email","Appraisal desk","Inspection cancelled: "+o.addr,
+        "The client cancelled the inspection at "+o.addr+" and has been asked to choose a new time.");
+      save(o,"Cancelled. <b>The appraiser was told not to drive out.</b> Pick a new time.");
+      return;
+    }
+    if(a==="noslot"){
+      var o2=current(); if(!o2) return;
+      var note=prompt("What times would work for you?");
+      if(note===null) return;
+      evt(o2,"Client could not use the offered times: "+note);
+      out(o2,"Email","Appraiser","Scheduling problem: "+o2.addr,"The client could not use the offered times. They said: "+note);
+      save(o2,"Sent to the appraiser. <b>They will call you.</b>");
+      return;
+    }
+    if(a==="ask"){
+      var o3=current(); if(!o3) return;
+      var box=document.getElementById("qbox");
+      var q=(box?box.value.trim():"").slice(0,2000);
+      if(!q){ toast("Write a question first."); return; }
+      evt(o3,"Question from the bank: "+q);
+      out(o3,"Email","Appraiser","Question on "+o3.addr,q+"\n\nSent by "+S.me.name+" via the portal. Logged on the independence tab.");
+      save(o3,"Sent and logged.");
+      return;
+    }
+    if(t.dataset.adv){
+      var o4=current();
+      if(!o4){ toast("Open an order first."); return; }
+      if(S.busy) return;
+      var from=t.dataset.from;
+      if(from!==undefined && Number(from)!==o4.step){
+        toast("This order already moved to <b>"+esc(status(o4))+"</b>.");
+        render(); return;
+      }
+      S.busy=true;
+      Promise.resolve(advance(o4,t.dataset.adv)).catch(function(){}).then(function(){ S.busy=false; });
+      return;
+    }
+  });
+
+  document.getElementById("fbtn").addEventListener("click",function(){
+    document.getElementById("modal").innerHTML=feedbackSheet();
+  });
+
+  /* ---------- boot ---------- */
+  function goLocal(why){
+    if(S.conn==="live") return;
+    S.conn="local"; S.connWhy=why||""; render();
+  }
+  function withTimeout(p,ms){
+    return Promise.race([p,new Promise(function(res){ setTimeout(function(){res(null);},ms); })]);
+  }
+  // The runtime injects window.claude asynchronously and it is NOT guaranteed to
+  // exist when this script first runs, so poll for it instead of checking once.
+  function whenRuntime(cb){
+    var tries=0;
+    (function poll(){
+      if(window.claude && typeof window.claude.use==="function") return cb(true);
+      if(++tries>90) return cb(false);
+      setTimeout(poll,150);
+    })();
+  }
+
+  function connect(){
+    S.conn="connecting"; S.connWhy=""; render();
+    whenRuntime(function(found){
+      if(!found){ goLocal("No page runtime here. This usually means the file was opened outside claude.ai."); return; }
+      Promise.all([
+        withTimeout(claude.use("db").catch(function(){return null;}),20000),
+        withTimeout(claude.use("assets").catch(function(){return null;}),20000),
+        withTimeout(claude.use("downloads").catch(function(){return null;}),20000)
+      ]).then(function(r){
+        db=r[0]; assets=r[1]; downloads=r[2];
+        if(!db){ goLocal("The shared database was not granted to this view."); return; }
+
+        var settled=false;
+        setTimeout(function(){ if(!settled) goLocal("The shared database did not answer. It may be waiting on a permission prompt."); },20000);
+
+        db.collection("orders").onSnapshot(function(snap){
+          settled=true; S.conn="live";
+          S.orders=snap.docs.map(function(d){ var v=d.data()||{}; v.id=d.id; return v; })
+            .sort(function(a,b){ return (b.createdAt||"")<(a.createdAt||"")?-1:1; });
+          if(S.sel && !byId(S.sel)) S.sel=null;
+          ready=true; render();
+        },function(e){ settled=true; goLocal(dbErr(e)); });
+
+        db.doc("config/availability").onSnapshot(function(snap){
+          S.config = snap.exists ? snap.data() : defaultConfig();
+          if(S.view==="avail"||S.view==="client") render();
+        },function(){});
+
+        db.collection("roster").onSnapshot(function(snap){
+          S.roster=snap.docs.map(function(d){ var v=d.data()||{}; v.id=d.id; return v; })
+            .sort(function(a,b){ return (a.name||"")<(b.name||"")?-1:1; });
+          S.rosterReady=true;
+          reconcileMe();
+          render();
+        },function(e){ S.rosterReady=true; goLocal(dbErr(e)); });
+
+        db.collection("feedback").onSnapshot(function(snap){
+          S.feedback=snap.docs.map(function(d){ var v=d.data()||{}; v.id=d.id; return v; });
+          if(S.view==="feedback") render();
+        },function(){});
+      }).catch(function(){ goLocal("Could not start the shared database."); });
+    });
+  }
+
+  S.token=readToken();
+  S.me=loadMe();
+  if(S.me&&S.me.role) S.view=homeFor(S.me.role);
+  if(!S.config) S.config=defaultConfig();
+  render();
+  connect();
+  window.addEventListener("hashchange",function(){
+    S.token=readToken();
+    if(!S.token) S.view = S.me ? homeFor(S.me.role) : "board";
+    render();
+  });
+})();
+</script>
+
+<div id="demobar">
+  <span>Demonstration &middot; sample data only &middot; nothing is sent and nothing leaves this browser</span>
+  <button type="button" onclick="window.__fsbReset&amp;&amp;window.__fsbReset()">Reset demo</button>
+</div>
+<style>
+  #demobar{position:fixed;left:0;right:0;bottom:0;z-index:45;display:flex;gap:12px;
+    align-items:center;justify-content:center;flex-wrap:wrap;
+    background:#22303f;color:#eef2f6;padding:7px 16px;
+    padding-bottom:calc(7px + env(safe-area-inset-bottom,0px));font-size:11.5px}
+  #demobar button{background:none;border:1px solid rgba(255,255,255,.35);color:#eef2f6;
+    border-radius:4px;padding:3px 9px;font:inherit;font-weight:600;cursor:pointer}
+  #demobar button:hover{background:rgba(255,255,255,.12)}
+  body{padding-bottom:46px}
+  .fbtn{bottom:58px!important}
+</style>
+
+</body>
+</html>

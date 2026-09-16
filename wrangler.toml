@@ -38,9 +38,14 @@ id = "85874fed1930410eb70ea081b9278011"
 # binding = "BUCKET"
 # bucket_name = "fsb-portal-docs"
 
+# Automatic email through Cloudflare Email Service (Workers Paid plan). After onboarding the sending
+# domain under Compute > Email Service > Email Sending, uncomment these two lines and redeploy.
+# [[send_email]]
+# name = "EMAIL"
+
 # Retries queued email every five minutes and prunes expired sessions.
 [triggers]
 crons = ["*/5 * * * *"]
 
 # Secrets (never in this file): npx wrangler secret put AUTH_SECRET
-# Optional: RESEND_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM
+# Optional: RESEND_API_KEY (if not using Cloudflare Email Service), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM

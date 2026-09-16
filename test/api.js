@@ -1,5 +1,17 @@
 /* End-to-end API test against a running wrangler dev (default http://127.0.0.1:8787). */
 const BASE = process.env.BASE || "http://127.0.0.1:8787";
+import {spawnSync} from "node:child_process";
+async function waitHealthy() {
+  for (let i = 0; i < 60; i++) { try { const r = await fetch(BASE + "/api/health"); if (r.ok) return; } catch (e) {} await new Promise(res => setTimeout(res, 500)); }
+  throw new Error("dev server did not come back");
+}
+async function provisionAdmin(name, email) {
+  const r = spawnSync("node", ["provision.js", "admin", "--name", name, "--email", email, "--local"], {encoding: "utf8"});
+  const m = /#invite=([a-z0-9]+)/.exec(r.stdout || "");
+  if (!m) throw new Error("provisioning failed: " + r.stdout + r.stderr);
+  await waitHealthy(); // wrangler dev reopens its local D1 after an external write
+  return m[1];
+}
 let pass = 0, fail = 0;
 function ok(cond, msg) { if (cond) { pass++; console.log("  ok   " + msg); } else { fail++; console.log("  FAIL " + msg); } }
 function client() {
@@ -19,13 +31,17 @@ function client() {
 }
 (async () => {
   const admin = client(), desk = client(), apr = client(), officer = client(), anon = client();
-  console.log("setup and sign-in");
-  let r = await anon.get("/api/session"); ok(r.data.setupNeeded === true && r.data.user === null, "fresh install reports setupNeeded");
+  console.log("provisioning and sign-in");
+  let r = await anon.get("/api/session"); ok(r.data.provisioned === false && r.data.user === null, "fresh install reports not provisioned");
   r = await anon.post("/api/orders", {addr: "x"}); ok(r.status === 401, "orders need sign-in (" + r.status + ")");
-  r = await admin.call("POST", "/api/setup", {name: "Ryan Curtis", email: "ryan@example.com", password: "short"}, {}); ok(r.status === 400, "setup rejects short password");
-  r = await admin.post("/api/setup", {name: "Ryan Curtis", email: "ryan@example.com", password: "correct horse battery"}); ok(r.status === 200 && r.data.user.role === "admin", "setup creates the first admin");
-  r = await anon.post("/api/setup", {name: "Mallory", email: "m@example.com", password: "correct horse battery"}); ok(r.status === 403, "second setup is refused");
+  r = await anon.post("/api/setup", {name: "Mallory", email: "m@example.com", password: "correct horse battery"}); ok(r.status === 401 || r.status === 404, "there is no self-service setup route");
+  const adminCode = await provisionAdmin("Ryan Curtis", "ryan@example.com"); ok(adminCode.length > 20, "vendor provisioning issued the bank administrator's invitation");
+  r = await anon.get("/api/session"); ok(r.data.provisioned === true, "portal reports provisioned");
+  r = await admin.post("/api/invite/accept", {code: adminCode, password: "short"}); ok(r.status === 400, "invite rejects a short password");
+  r = await admin.post("/api/invite/accept", {code: adminCode, password: "correct horse battery"}); ok(r.status === 200 && r.data.user.role === "admin", "bank administrator accepts the invitation");
   r = await admin.get("/api/session"); ok(r.data.user && r.data.user.name === "Ryan Curtis" && r.data.config, "admin session persists with config");
+  const re = spawnSync("node", ["provision.js", "reinvite", "--email", "ryan@example.com", "--local"], {encoding: "utf8"}); ok(/#invite=/.test(re.stdout), "vendor can reissue the administrator invitation"); await waitHealthy();
+  r = await admin.get("/api/audit"); ok(r.status === 200 && r.data.audit.some(x => /Provisioned the bank administrator/.test(x.what)), "provisioning is written to the administration record");
   r = await admin.call("POST", "/api/logout", {}, {headers: {"x-requested-with": "nope"}}); ok(r.status === 403, "mutation without the header is refused");
 
   console.log("people and invites");
@@ -49,6 +65,10 @@ function client() {
   r = await apr.put("/api/config", {days: [1, 2, 3, 4, 5], startHour: 8.5, endHour: 16, slotMinutes: 60, bufferMinutes: 45, leadHours: 0, appraiserName: "Sam Appraiser", appraiserPhone: "(309) 555-0100", appraiserEmail: "sam@example.com", daysOff: []});
   ok(r.status === 200 && r.data.config.appraiserName === "Sam Appraiser", "appraiser saves availability");
   r = await apr.get("/api/slots?n=3"); ok(r.status === 200 && r.data.slots.length === 3, "slots generated: " + r.data.slots[0]);
+  r = await admin.put("/api/config", {days: [1, 2, 3, 4, 5], startHour: 8.5, endHour: 16, slotMinutes: 60, bufferMinutes: 45, leadHours: 0, appraiserName: "Sam Appraiser", appraiserPhone: "(309) 555-0100", appraiserEmail: "sam@example.com", daysOff: [], deskCopyEmails: ["desk-shared@example.com", "bad"]});
+  ok(r.status === 200 && r.data.config.deskCopyEmails.length === 1, "admin sets the desk copy list (invalid address dropped)");
+  r = await apr.put("/api/config", {days: [1, 2, 3, 4, 5], startHour: 8.5, endHour: 16, slotMinutes: 60, bufferMinutes: 45, leadHours: 0, appraiserName: "Sam Appraiser", appraiserPhone: "(309) 555-0100", appraiserEmail: "sam@example.com", daysOff: [], deskCopyEmails: []});
+  ok(r.status === 200 && r.data.config.deskCopyEmails.length === 1, "appraiser cannot clear the desk copy list");
 
   console.log("order life cycle");
   r = await officer.post("/api/orders", {addr: "1 Main", attestation: true}); ok(r.status === 403, "officer cannot place orders");
@@ -62,6 +82,7 @@ function client() {
   r = await apr.post("/api/orders/" + oid + "/actions", {action: "accept", from: 0, params: {fee: 550}}); ok(r.status === 200 && r.data.order.step === 1 && r.data.order.fee === 550, "appraiser accepts with fee");
   ok(r.data.order.messages.some(m => m.party === "borrower" && m.channel === "sms" && /#t=/.test(m.body)), "borrower SMS carries the secure link");
   ok(r.data.order.messages.some(m => m.party === "officer"), "loan officer copied on acceptance");
+  ok(r.data.order.messages.filter(m => m.party === "desk" && m.template === "accepted").length === 2, "desk notice goes to the orderer and the copy address");
   r = await apr.post("/api/orders/" + oid + "/actions", {action: "accept", from: 0}); ok(r.status === 409, "stale double-accept refused");
   r = await desk.post("/api/orders/" + oid + "/actions", {action: "edit", params: {borrowerPhone: "(309) 555-0150", notes: "Dog on site, gate code 1234"}}); ok(r.status === 200 && r.data.order.borrowerPhone === "(309) 555-0150", "desk edits contact and notes");
   r = await apr.post("/api/orders/" + oid + "/actions", {action: "schedule", from: 1}); ok(r.status === 200 && r.data.order.step === 2, "scheduling request sent");

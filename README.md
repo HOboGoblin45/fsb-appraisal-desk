@@ -6,26 +6,29 @@ The appraisal order, status, scheduling and delivery portal for First Security B
 
 The appraisal desk places an order on one page and attests to recusal from the credit decision. The appraiser is notified, accepts or declines, and sends a scheduling request. The borrower (or agent, when access goes through the agent) receives a text and an email with a personal link and books the inspection against the appraiser's real availability. Everyone sees the same live status bar: Received, Accepted, Scheduling, Scheduled, Inspected, In review, Delivered, Invoiced. The appraiser uploads the report and invoice through the portal, the desk and loan officer download them, and the borrower gets a copy through the same personal link after agreeing to electronic delivery. Every step, message, document and download is written to an append-only independence record that exports as a text file.
 
-## Roles
+## Who controls it
 
-Bank admin manages people and can see every order. Appraisal desk places, edits and cancels orders, uploads documents and sends factual questions. Loan officer is read only and can download the finished report and invoice. Appraiser accepts, schedules, inspects, delivers, invoices and sets availability. Roles are assigned by the administrator when a person is invited; nobody chooses their own.
+The portal was commissioned by First Security Bank, and the bank controls access. The bank names its portal administrator; the vendor (Apprifi) provisions that one account and hands the bank a single invitation link. From then on the administrator invites the bank's staff and the appraiser, assigns roles, suspends accounts and issues new sign-in links. The vendor holds no account inside the portal; it operates the infrastructure (Cloudflare account, deployments, backups) and can only re-issue the administrator's invitation at the bank's request.
 
-## First day
+Roles: Bank admin manages people and settings and can see every order. Appraisal desk places, edits and cancels orders, uploads documents and sends factual questions. Loan officer is read only and can download the finished report and invoice. Appraiser accepts, schedules, inspects, delivers, invoices and sets availability. Roles are assigned when a person is invited; nobody chooses their own.
 
-1. Open https://fsb.apprifi.com. On a fresh installation it shows a setup screen. Enter the setup key that was shown at deployment, your name, work email and a password. That account is the bank administrator.
-2. On the People tab, add each assistant, loan officer and the appraiser with their role. Each one gets a one-time sign-in link that lasts seven days. Copy it or use "Send by email" to draft the message, and send it to them. The same button issues a new link if someone forgets their password.
-3. The appraiser signs in and fills in Availability: name and callback number shown to borrowers, days and hours worked, inspection length, travel buffer, lead time and days off.
-4. The desk places the first order and uploads the sales contract on the Documents tab.
+## Going into service
+
+1. The bank tells the vendor who its administrator is (name and work email). The vendor runs, from the deploying PC:
+
+       node provision.js admin --name "Full Name" --email person@fsb1.com
+
+   and sends the printed invitation link to that person. It works once and expires in seven days (`node provision.js reinvite --email ...` issues another). Until this happens the site shows "Not yet in service".
+2. The administrator opens the link, chooses a password, and lands on the People tab. There they add each assistant, loan officer and the appraiser with a role. Each gets a one-time sign-in link; "Send by email" drafts the message. The same button resets a forgotten password later.
+3. Under Bank settings the administrator can add shared or manager addresses to be copied on every desk notice.
+4. The appraiser signs in and fills in Availability: name and callback number shown to borrowers, days and hours worked, inspection length, travel buffer, lead time and days off.
+5. The desk places the first order and uploads the sales contract on the Documents tab.
 
 ## Email and texting
 
 Until an email service key is added, nothing is sent automatically. Every message the system composes appears in the Outbox with its real wording and an "Open in email app" button that drafts it in Outlook or Gmail; press send there, then "Mark as sent" so the record shows who sent it. Texts have an "Open in Messages" button that drafts the text on a phone. Notices to bank staff and the appraiser are not queued while email is off, because they see the same live board.
 
-To turn on automatic email: create a Resend account (resend.com), verify the sending domain by adding the DNS records it gives you to the apprifi.com zone in Cloudflare, create an API key, then on the PC that deploys this project run
-
-    npx wrangler secret put RESEND_API_KEY
-
-and paste the key. Optionally set MAIL_FROM and MAIL_REPLY_TO in wrangler.toml under [vars] and redeploy. From then on queued messages go out within seconds and retry every five minutes for up to half an hour if the mail service is down.
+To turn on automatic email, the recommended path stays inside the same Cloudflare account: Cloudflare Email Service (beta, requires the Workers Paid plan at $5 a month, which includes 3,000 emails a month and also lifts the free plan's CPU limit). In the Cloudflare dashboard open Compute, Email Service, Email Sending, choose Onboard Domain and pick apprifi.com or fsb.apprifi.com; Cloudflare adds the SPF, DKIM, DMARC and bounce records itself because the DNS is already there. Then uncomment the two `[[send_email]]` lines in wrangler.toml, set `MAIL_FROM` under `[vars]` to an address on that domain, and redeploy. The alternative is Resend: create the account, verify the domain with the DNS records it gives you, and run `npx wrangler secret put RESEND_API_KEY`. Either way, queued messages go out within seconds and retry every five minutes, up to six attempts, if the service is down. Set `MAIL_REPLY_TO` to a bank mailbox so replies reach the desk.
 
 To turn on automatic texting: complete A2P 10DLC brand and campaign registration with Twilio (several weeks), then set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM the same way.
 
@@ -49,7 +52,9 @@ The whole application is in this repository. `src/core.js` holds the state machi
     npx wrangler d1 migrations apply fsb-portal --remote   # after any new migration
     npx wrangler deploy
 
-Secrets are never in the repository: AUTH_SECRET (required, signs sessions and peppers passwords; changing it signs everyone out and invalidates all passwords), SETUP_KEY (optional, protects the first-run setup screen), RESEND_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM.
+Secrets are never in the repository: AUTH_SECRET (required, signs sessions and peppers passwords; changing it signs everyone out and invalidates all passwords), RESEND_API_KEY (only if not using Cloudflare Email Service), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM.
+
+`node provision.js status` shows how many accounts and orders the production database holds without opening anything else.
 
 To run locally: `npx wrangler d1 migrations apply fsb-portal --local`, then `npm run dev`, then open http://127.0.0.1:8787. `node test/api.js` runs the API suite against it.
 

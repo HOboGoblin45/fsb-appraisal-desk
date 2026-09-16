@@ -1,6 +1,4 @@
 node_modules/
 .wrangler/
 .dev.vars
-
-.wrangler-login.log
-
+public/app.js

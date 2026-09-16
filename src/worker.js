@@ -89,6 +89,7 @@ function cleanConfig(input) {
   c.daysOff = Array.isArray(input.daysOff) ? input.daysOff.map(x => s(x, 10)).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x)).slice(0, 200) : [];
   c.appraiserName = s(input.appraiserName, 80); c.appraiserPhone = s(input.appraiserPhone, 40); c.appraiserEmail = s(input.appraiserEmail, 120).toLowerCase();
   c.note = s(input.note, 500); c.timeZone = CORE.TZ;
+  c.deskCopyEmails = Array.isArray(input.deskCopyEmails) ? input.deskCopyEmails.map(x => s(x, 120).toLowerCase()).filter(emailOk).slice(0, 20) : [];
   return c;
 }
 
@@ -185,14 +186,17 @@ async function queueMessages(env, base, o, msgs) {
   if (!msgs.length) return [];
   const appraisers = (await env.DB.prepare("SELECT name,email,phone FROM users WHERE role='appraiser' AND active=1").all()).results || [];
   const cfg = await loadConfig(env);
-  const emailOn = !!env.RESEND_API_KEY, smsOn = !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_FROM);
+  const pv = providers(env), emailOn = pv.email, smsOn = pv.sms;
   const link = t => base + "/#t=" + t, portal = base + "/#o=" + o.id;
   const stmts = [], out = [];
   for (const m of msgs) {
     let targets = [];
     if (m.party === "borrower") targets = [{name: o.borrowerName || "Borrower", email: o.borrowerEmail, phone: o.borrowerPhone, tok: o.tokB}];
     else if (m.party === "agent") targets = [{name: o.agentName || "Agent", email: o.agentEmail, phone: o.agentPhone, tok: o.tokA}];
-    else if (m.party === "desk") targets = [{name: o.orderedBy || "Appraisal desk", email: o.orderedByEmail, phone: ""}];
+    else if (m.party === "desk") {
+      targets = [{name: o.orderedBy || "Appraisal desk", email: o.orderedByEmail, phone: ""}];
+      (cfg.deskCopyEmails || []).forEach(e => { if (e && e !== (o.orderedByEmail || "").toLowerCase()) targets.push({name: "Appraisal desk", email: e, phone: ""}); });
+    }
     else if (m.party === "officer") targets = [{name: o.officerName || "Loan officer", email: o.officerEmail, phone: ""}];
     else if (m.party === "appraiser") targets = appraisers.length ? appraisers : [{name: cfg.appraiserName || "Appraiser", email: cfg.appraiserEmail, phone: cfg.appraiserPhone}];
     for (const t of targets) {
@@ -248,8 +252,16 @@ async function runAction(env, req, ctx, orderId, action, params, actor, opts = {
 }
 
 /* ---------- sending ---------- */
+function providers(env) {
+  return {email: !!(env.EMAIL || env.RESEND_API_KEY), emailVia: env.EMAIL ? "cloudflare" : (env.RESEND_API_KEY ? "resend" : ""), sms: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_FROM)};
+}
 async function sendEmail(env, m) {
-  const from = env.MAIL_FROM || "First Security Bank Appraisal Desk <no-reply@fsb.apprifi.com>";
+  const from = env.MAIL_FROM || "First Security Bank Appraisal Desk <appraisals@fsb.apprifi.com>";
+  if (env.EMAIL) {
+    // Cloudflare Email Service binding: the sending domain is verified in the same account
+    const r = await env.EMAIL.send({to: m.to_addr, from, subject: m.subject || "First Security Bank appraisal update", text: m.body, replyTo: env.MAIL_REPLY_TO || undefined});
+    return (r && r.messageId) || "";
+  }
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST", headers: {"authorization": "Bearer " + env.RESEND_API_KEY, "content-type": "application/json"},
     body: JSON.stringify({from, to: [m.to_addr], subject: m.subject || "First Security Bank appraisal update", text: m.body, reply_to: env.MAIL_REPLY_TO || undefined})
@@ -268,7 +280,7 @@ async function sendSms(env, m) {
 }
 function normalizePhone(p) { const d = String(p || "").replace(/\D/g, ""); if (d.length === 10) return "+1" + d; if (d.length === 11 && d[0] === "1") return "+" + d; return String(p || ""); }
 async function dispatch(env, limit = 20) {
-  const emailOn = !!env.RESEND_API_KEY, smsOn = !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_FROM);
+  const pv = providers(env), emailOn = pv.email, smsOn = pv.sms;
   if (!emailOn && !smsOn) return 0;
   const rows = (await env.DB.prepare("SELECT * FROM messages WHERE status='queued' AND attempts<6 ORDER BY created_at LIMIT ?").bind(limit).all()).results || [];
   let n = 0;
@@ -391,25 +403,9 @@ async function api(req, env, ctx) {
   if (path === "/api/session" && method === "GET") {
     const user = await currentUser(env, req);
     const count = (await env.DB.prepare("SELECT COUNT(*) n FROM users").first()).n;
-    const out = {user: user ? pubUser(user) : null, setupNeeded: count === 0, setupNeedsKey: count === 0 && !!env.SETUP_KEY, providers: {email: !!env.RESEND_API_KEY, sms: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_FROM)}, time: nowISO(), storage: env.BUCKET ? "r2" : "kv"};
+    const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv"};
     if (user) out.config = await loadConfig(env);
     return json(out);
-  }
-  if (path === "/api/setup" && method === "POST") {
-    requireSecret(env);
-    const count = (await env.DB.prepare("SELECT COUNT(*) n FROM users").first()).n;
-    if (count > 0) throw denied("Setup has already been completed. Sign in instead.");
-    const b = await readJSON(req);
-    if (env.SETUP_KEY && !safeEqual(String(b.setupKey || ""), String(env.SETUP_KEY))) throw denied("The setup key is wrong. It was shown when the portal was deployed.");
-    const name = s(b.name, 80), email = s(b.email, 120).toLowerCase();
-    if (!name) throw bad("Your name is required."); if (!emailOk(email)) throw bad("A valid email is required.");
-    checkPassword(b.password);
-    const id = uid("u");
-    await env.DB.prepare("INSERT INTO users (id,email,name,role,phone,active,created_at,created_by,updated_at) VALUES (?,?,?,?,?,1,?,?,?)").bind(id, email, name, "admin", s(b.phone, 40), nowISO(), "setup", nowISO()).run();
-    await setPassword(env, id, b.password);
-    await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), name, "Portal set up; first administrator account created.").run();
-    const cookie = await startSession(env, req, id);
-    return json({ok: true, user: {id, name, email, role: "admin"}}, 200, {"set-cookie": cookie});
   }
   if (path === "/api/login" && method === "POST") {
     requireSecret(env);
@@ -536,6 +532,7 @@ async function api(req, env, ctx) {
     if (method === "PUT") {
       if (!CORE.can(role, "config")) throw denied("Only the appraiser or the administrator can change availability.");
       const c = cleanConfig(await readJSON(req));
+      if (role !== "admin") c.deskCopyEmails = (await loadConfig(env)).deskCopyEmails || [];
       await env.DB.batch([
         env.DB.prepare("INSERT INTO config (key,value,updated_at,updated_by) VALUES ('availability',?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by").bind(JSON.stringify(c), nowISO(), user.name),
         env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), user.name, "Updated appraiser availability and contact settings.")

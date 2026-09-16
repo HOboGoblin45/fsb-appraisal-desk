@@ -75,7 +75,7 @@ var CORE = (function(){
 
   function defaultConfig(){
     return {days:[1,2,3,4,5],startHour:8.5,endHour:16,slotMinutes:60,bufferMinutes:45,leadHours:24,daysOff:[],
-            appraiserName:"",appraiserPhone:"",appraiserEmail:"",timeZone:TZ,note:""};
+            appraiserName:"",appraiserPhone:"",appraiserEmail:"",timeZone:TZ,note:"",deskCopyEmails:[]};
   }
   function num(v,dflt){ v=Number(v); return isFinite(v)&&v>=0?v:dflt; }
   /* Open inspection times: honours days worked, hours, days off, lead time, length and travel buffer.

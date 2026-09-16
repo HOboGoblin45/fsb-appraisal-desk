@@ -75,7 +75,7 @@ var CORE = (function(){
 
   function defaultConfig(){
     return {days:[1,2,3,4,5],startHour:8.5,endHour:16,slotMinutes:60,bufferMinutes:45,leadHours:24,daysOff:[],
-            appraiserName:"",appraiserPhone:"",appraiserEmail:"",timeZone:TZ,note:""};
+            appraiserName:"",appraiserPhone:"",appraiserEmail:"",timeZone:TZ,note:"",deskCopyEmails:[]};
   }
   function num(v,dflt){ v=Number(v); return isFinite(v)&&v>=0?v:dflt; }
   /* Open inspection times: honours days worked, hours, days off, lead time, length and travel buffer.
@@ -351,7 +351,7 @@ var CORE = (function(){
   var STEPS=CORE.STEPS, ROLES=CORE.ROLES, CLIENT_LABEL=CORE.CLIENT_LABEL, DOC_KINDS=CORE.DOC_KINDS;
   var S = {
     me:null, view:"board", sel:null, tab:"status", orders:[], detail:{}, config:null, feedback:[], users:[], audit:[], messages:[],
-    busy:false, toastT:null, boot:"loading", bootWhy:"", token:null, client:null, invite:null, inviteCode:null, setupNeeded:false,
+    busy:false, toastT:null, boot:"loading", bootWhy:"", token:null, client:null, invite:null, inviteCode:null, provisioned:true,
     providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv"
   };
 
@@ -437,7 +437,7 @@ var CORE = (function(){
   function loadDetail(id){
     return api("GET","/api/orders/"+encodeURIComponent(id)).then(function(d){ S.detail[id]=d.order; upsert(d.order); render(); return d.order; });
   }
-  function loadUsers(){ if(!S.me||S.me.role!=="admin") return Promise.resolve(); return api("GET","/api/users").then(function(d){ S.users=d.users; }); }
+  function loadUsers(){ if(!S.me||S.me.role!=="admin") return Promise.resolve(); return Promise.all([api("GET","/api/users"),api("GET","/api/audit")]).then(function(r){ S.users=r[0].users; S.audit=r[1].audit||[]; }); }
   function loadFeedback(){ return api("GET","/api/feedback").then(function(d){ S.feedback=d.feedback; }); }
   function loadMessages(){ var q=S.mfilter==="all"?"":("?status="+S.mfilter); return api("GET","/api/messages"+q).then(function(d){ S.messages=d.messages; }); }
   function poll(){
@@ -467,7 +467,7 @@ var CORE = (function(){
       return api("GET","/api/invite/"+encodeURIComponent(h.invite)).then(function(d){ S.invite=d; render(); }).catch(function(e){ S.invite={error:e.message}; render(); });
     }
     api("GET","/api/session").then(function(d){
-      S.boot="ready"; S.setupNeeded=!!d.setupNeeded; S.setupNeedsKey=!!d.setupNeedsKey; S.providers=d.providers||S.providers; S.storage=d.storage||"kv";
+      S.boot="ready"; S.provisioned=d.provisioned!==false; S.providers=d.providers||S.providers; S.storage=d.storage||"kv";
       if(d.user) afterSignIn(d.user,d); else render();
     }).catch(function(e){ S.boot="offline"; S.bootWhy=e.message; render(); });
   }
@@ -532,27 +532,18 @@ var CORE = (function(){
   }
 
   /* ---------- entry screens ---------- */
-  function setupHtml(){
-    return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Set up the portal</h2>'+
-      '<p class="note">This is a fresh installation. The first account is the bank administrator, who then invites everyone else and assigns their roles.</p></div></div>'+
-      '<div class="pb"><div class="stack">'+
-      '<label class="f">Your name<input id="su_name" autocomplete="name"></label>'+
-      '<label class="f">Work email<input id="su_email" type="email" autocomplete="username"></label>'+
-      '<label class="f">Choose a password (10 characters or more)<input id="su_pw" type="password" autocomplete="new-password"></label>'+
-      (S.setupNeedsKey?'<label class="f">Setup key (given to you with the deployment)<input id="su_key" autocomplete="off"></label>':'')+
-      '<div><button class="btn btn-p" data-a="setup">Create administrator account</button></div>'+
-      '</div></div></div></div>';
-  }
   function signinHtml(){
     if(S.boot==="loading") return '<div class="panel"><div class="empty"><b>One moment</b>Connecting.</div></div>';
     if(S.boot==="offline") return '<div class="panel"><div class="empty"><b>Cannot reach the server</b>'+esc(S.bootWhy||"")+'<div style="margin-top:10px"><button class="btn btn-s" data-a="retry">Try again</button></div></div></div>';
+    if(!S.provisioned) return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Not yet in service</h2>'+
+      '<p class="note">This portal has been installed for First Security Bank but the bank has not yet designated its administrator. Once the bank names that person, they receive an invitation, set their password, and add everyone else.</p></div></div></div></div>';
     return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Sign in</h2>'+
-      '<p class="note">Use the email and password from your invitation. Your role (appraisal desk, loan officer, appraiser or administrator) is set by the bank administrator and decides which screens you see.</p></div></div>'+
+      '<p class="note">Access is granted by First Security Bank\'s portal administrator. Use the email and password you chose from your invitation. Your role (appraisal desk, loan officer, appraiser or administrator) is assigned by the bank and decides which screens you see.</p></div></div>'+
       '<div class="pb"><form class="stack" id="signinForm">'+
       '<label class="f">Work email<input id="si_email" type="email" autocomplete="username" inputmode="email"></label>'+
       '<label class="f">Password<input id="si_pw" type="password" autocomplete="current-password"></label>'+
       '<div><button class="btn btn-p" type="submit" data-a="signin">Sign in</button></div>'+
-      '<p class="sm muted">Forgot your password, or never got an invitation? Ask the bank administrator to issue a new sign-in link.</p>'+
+      '<p class="sm muted">Forgot your password, or never received an invitation? Ask the bank\'s portal administrator to issue a new sign-in link.</p>'+
       '</form></div></div><p class="brandline">First Security Bank &middot; Mackinaw, Heritage Lake, Deer Creek, Danvers</p></div>';
   }
   function inviteHtml(){
@@ -585,7 +576,21 @@ var CORE = (function(){
       '<button class="btn btn-p" data-a="addperson">Add someone</button></div>'+
       (rows?'<div class="tablewrap"><table><thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Last seen</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<div class="empty"><b>Loading</b></div>')+
       '<div class="pb"><div class="callout"><b>Roles.</b> '+Object.keys(ROLES).map(function(k){ return '<b>'+esc(ROLES[k].name)+'</b>: '+esc(ROLES[k].hint); }).join(" ")+'</div></div></div>'+
+      adminSettingsHtml()+
       (S.audit.length?'<div class="panel"><div class="ph"><div><h2>Administration record</h2><p class="note">Who changed access and settings.</p></div></div><div class="pb"><div class="log">'+S.audit.map(function(a){ return '<div><b>'+esc(fmtTime(a.at))+'</b>  '+esc(a.who)+'  &middot;  '+esc(a.what)+'</div>'; }).join("")+'</div></div></div>':'');
+  }
+  function adminSettingsHtml(){
+    var c=S.config||CORE.defaultConfig(), list=c.deskCopyEmails||[];
+    var email=S.providers.email?('<span class="pill ok">Email sending automatically'+(S.providers.emailVia==="cloudflare"?" via Cloudflare":"")+'</span>'):'<span class="pill manual">Email by hand from the Outbox</span>';
+    var sms=S.providers.sms?'<span class="pill ok">Texts sending automatically</span>':'<span class="pill manual">Texts by hand (carrier registration pending)</span>';
+    return '<div class="panel"><div class="ph"><div><h2>Bank settings</h2><p class="note">Who is copied on desk notices, and how messages leave the portal.</p></div>'+
+      '<button class="btn btn-p btn-s" data-a="savebank">Save</button></div><div class="pb"><div class="stack">'+
+      '<div class="row">'+email+sms+'</div>'+
+      '<div><p class="lbl" style="margin-bottom:7px">Copy these addresses on every desk notice</p>'+
+      '<p class="sm muted" style="margin-bottom:6px">Desk notices (accepted, scheduled, inspected, delivered, invoiced, holds, declines) always go to the person who placed the order. Add shared or manager addresses here to copy them too.</p>'+
+      '<div>'+list.map(function(e){ return '<span class="dayoff">'+esc(e)+' <button type="button" data-copyoff="'+esc(e)+'" aria-label="Remove">&times;</button></span>'; }).join("")+'</div>'+
+      '<div class="row" style="margin-top:6px"><input id="b_copy" type="email" placeholder="assistant@bank.com" style="max-width:280px"><button class="btn btn-s" data-a="addcopy">Add address</button></div></div>'+
+      '</div></div></div>';
   }
   function personSheet(){
     return sheet("Add someone",
@@ -815,7 +820,7 @@ var CORE = (function(){
   /* ---------- outbox ---------- */
   function outboxHtml(){
     var fs=[["manual","Needs sending"],["queued","Sending"],["sent","Sent"],["failed","Failed"],["portal","Staff notices"],["all","All"]];
-    var prov='<div class="callout'+(S.providers.email?"":" warn")+'"><b>Email: '+(S.providers.email?"sending automatically.":"not connected yet.")+'</b> '+(S.providers.email?"Queued messages go out within a few seconds and retry for up to half an hour if the mail service is down.":"Until the mail service key is added, every email below has an \"Open in email app\" button that drafts it in Outlook or Gmail for you; press send there, then mark it sent here.")+
+    var prov='<div class="callout'+(S.providers.email?"":" warn")+'"><b>Email: '+(S.providers.email?("sending automatically"+(S.providers.emailVia==="cloudflare"?" through Cloudflare Email Service.":".")):"not connected yet.")+'</b> '+(S.providers.email?"Queued messages go out within a few seconds and retry for up to half an hour if the mail service is down.":"Until the mail service key is added, every email below has an \"Open in email app\" button that drafts it in Outlook or Gmail for you; press send there, then mark it sent here.")+
       ' <b>Texts: '+(S.providers.sms?"sending automatically.":"by hand.")+'</b> '+(S.providers.sms?"":"US carriers require A2P 10DLC registration before software can text; until that clears, \"Open in Messages\" drafts the text on a phone.")+
       (S.providers.email?"":" Notices to bank staff and the appraiser are not queued while email is off, because everyone sees the same live board; they sit under Staff notices for the record.")+'</div>';
     return '<div class="panel"><div class="ph"><div><h2>Outbox</h2><p class="note">Every email and text the system composes, with its real wording and where it stands. Nothing here is hidden from you.</p></div></div>'+
@@ -891,7 +896,7 @@ var CORE = (function(){
     if(S.inviteCode){ nav.innerHTML='<button role="tab" aria-selected="true" disabled>Welcome</button>'; who.innerHTML=""; fbtn.hidden=true; stage.innerHTML=inviteHtml(); return; }
     if(!S.me){
       nav.innerHTML='<button role="tab" aria-selected="true" disabled>Sign in</button>'; who.innerHTML=""; fbtn.hidden=true;
-      stage.innerHTML=S.setupNeeded?setupHtml():signinHtml();
+      stage.innerHTML=signinHtml();
       var f=stage.querySelector("input"); if(f&&S.boot==="ready") try{ f.focus(); }catch(e){}
       return;
     }
@@ -1008,7 +1013,7 @@ var CORE = (function(){
   }
   function saveAvail(){
     var c=S.config||CORE.defaultConfig();
-    var body={days:c.days||[],daysOff:c.daysOff||[],startHour:Number(val("c_start"))||8.5,endHour:Number(val("c_end"))||16,slotMinutes:Number(val("c_slot"))||60,
+    var body={deskCopyEmails:c.deskCopyEmails||[],days:c.days||[],daysOff:c.daysOff||[],startHour:Number(val("c_start"))||8.5,endHour:Number(val("c_end"))||16,slotMinutes:Number(val("c_slot"))||60,
       bufferMinutes:Number(val("c_buf"))||0,leadHours:Number(val("c_lead"))||0,appraiserName:val("c_aname"),appraiserPhone:val("c_aphone"),appraiserEmail:val("c_aemail")};
     api("PUT","/api/config",body).then(function(d){ S.config=d.config; return refreshView(); }).then(function(){ toast("Availability saved."); }).catch(fail);
   }
@@ -1048,8 +1053,8 @@ var CORE = (function(){
   document.addEventListener("keydown",function(e){ if(e.key==="Escape"){ if($("modal").innerHTML){ modal(""); } if(S.menu){ S.menu=false; render(); } } });
 
   document.addEventListener("click",function(e){
-    var t=e.target.closest("[data-stop],[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel]");
-    if(S.menu&&!(t&&t.dataset.a==="menu")&&!(t&&t.dataset.stop)){ S.menu=false; render(); if(!t) return; t=e.target.closest("[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel]"); if(!t) return; }
+    var t=e.target.closest("[data-stop],[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-copyoff],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel]");
+    if(S.menu&&!(t&&t.dataset.a==="menu")&&!(t&&t.dataset.stop)){ S.menu=false; render(); if(!t) return; t=e.target.closest("[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-copyoff],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel]"); if(!t) return; }
     if(!t) return;
     if(t.dataset.stop&&!t.dataset.a) return;
     var a=t.dataset.a, o=current();
@@ -1073,13 +1078,15 @@ var CORE = (function(){
     if(a==="menu"){ S.menu=!S.menu; render(); return; }
     if(a==="closesheet"){ modal(""); return; }
     if(a==="retry"){ S.boot="loading"; render(); boot(); return; }
-    if(a==="setup"){ if(S.busy) return; S.busy=true; api("POST","/api/setup",{name:val("su_name"),email:val("su_email"),password:($("su_pw")||{}).value||"",setupKey:val("su_key")}).then(function(d){ S.setupNeeded=false; return api("GET","/api/session").then(function(sd){ afterSignIn(d.user,sd); toast("Welcome. <b>Add your people on this tab.</b>"); }); }).catch(fail).then(function(){ S.busy=false; }); return; }
     if(a==="signin"){ submitSignin(); return; }
     if(a==="acceptinvite"){ acceptInvite(); return; }
     if(a==="signout"){ api("POST","/api/logout",{}).catch(function(){}).then(function(){ S.me=null; S.sel=null; S.orders=[]; S.detail={}; S.menu=false; S.lastSync=""; render(); }); return; }
     if(a==="changepw"){ modal(sheet("Change my password",'<label class="f">Current password<input id="cp_cur" type="password" autocomplete="current-password"></label><label class="f">New password (10 characters or more)<input id="cp_new" type="password" autocomplete="new-password"></label>',"Change","dochangepw")); return; }
     if(a==="dochangepw"){ api("POST","/api/password",{current:($("cp_cur")||{}).value||"",next:($("cp_new")||{}).value||""}).then(function(){ modal(""); toast("Password changed."); }).catch(fail); return; }
     if(a==="addperson"){ modal(personSheet()); return; }
+    if(a==="addcopy"){ var ce=val("b_copy").toLowerCase(); if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ce)){ toast("Enter a valid email address."); return; } S.config=S.config||CORE.defaultConfig(); S.config.deskCopyEmails=S.config.deskCopyEmails||[]; if(S.config.deskCopyEmails.indexOf(ce)===-1) S.config.deskCopyEmails.push(ce); var bi=$("b_copy"); if(bi) bi.value=""; render(); return; }
+    if(t.dataset.copyoff){ S.config.deskCopyEmails=(S.config.deskCopyEmails||[]).filter(function(x){ return x!==t.dataset.copyoff; }); render(); return; }
+    if(a==="savebank"){ var cc=S.config||CORE.defaultConfig(); api("PUT","/api/config",cc).then(function(d){ S.config=d.config; render(); toast("Bank settings saved."); }).catch(fail); return; }
     if(a==="saveperson"){ var pn=val("p_name"), pe=val("p_email"), pr=val("p_role"), pp=val("p_phone"); if(!pn||!pe){ toast("Name and email are required."); return; }
       api("POST","/api/users",{name:pn,email:pe,role:pr,phone:pp}).then(function(d){ modal(inviteLinkSheet(pn,pe,d.inviteLink,d.expiresDays)); return loadUsers(); }).then(render).catch(fail); return; }
     if(a==="gonew"){ S.view="new"; render(); return; }

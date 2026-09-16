@@ -38,6 +38,10 @@ PDF, images, XML (UAD), CSV, Word, Excel and ZIP up to 20 MB each. Each file is 
 
 Storage is Workers KV (1 GB on the free plan, roughly 100 to 300 appraisal files). To move to R2 for unlimited storage, enable R2 on the Cloudflare account, create a bucket named fsb-portal-docs, uncomment the r2_buckets block in wrangler.toml and redeploy. New uploads go to R2; existing files keep working from KV.
 
+## The demonstration copy
+
+https://fsbdemo.apprifi.com is the same code deployed as a second Worker (--env demo) with its own database and storage. It carries a DEMO flag: a banner, one-click sign-in as any role (password FSBdemo-2026 for every sample account), messages marked composed rather than sent, a "Reset the demonstration" item in the menu, and a cron at 08:00 UTC that reloads the sample data every night. The seed (src/demo.js) replays eight fictional orders through the real order and action code, so every event, message and client link is genuine. Anyone with the link can use it; nothing in it is real and nothing leaves it. Deploy changes to it with npm run build and npx wrangler deploy --env demo; reload its data at any time with a POST to /api/demo/reset while signed in.
+
 ## Limits worth knowing
 
 Cloudflare's free Workers plan allows 100,000 requests a day and 10 milliseconds of CPU per request. Sign-in uses PBKDF2 with 100,000 iterations, which is the most the platform allows; if sign-in ever fails with a CPU limit error, move the account to the Workers Paid plan ($5 a month), which also raises every other limit. D1 holds 5 GB. Sessions last 14 days of inactivity. Invitations last 7 days. Sign-in is rate limited to 10 attempts per email and 30 per address every 15 minutes.
@@ -60,7 +64,7 @@ To run locally: `npx wrangler d1 migrations apply fsb-portal --local`, then `npm
 
 ## Backups
 
-D1 keeps 30 days of point-in-time history on every plan. `npx wrangler d1 export fsb-portal --remote --output backup.sql` writes a full SQL dump; run it monthly and keep the file with the bank's records. Documents in KV are not included in the SQL dump; the independence record for each order lists every document and who uploaded it.
+D1 can restore the database to any minute in the last 7 days on the free plan, or 30 days on the Workers Paid plan (the plan that also enables automatic email). `npx wrangler d1 export fsb-portal --remote --output backup.sql` writes a full SQL dump; run it monthly and keep the file with the bank's records. Documents in KV are not included in the SQL dump; the independence record for each order lists every document and who uploaded it.
 
 ## Records and compliance notes
 

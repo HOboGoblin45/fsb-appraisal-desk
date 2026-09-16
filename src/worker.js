@@ -3,6 +3,7 @@
    the message queue; KV (or R2) holds document bytes. Sessions are HttpOnly cookies backed by D1.
    Nothing here trusts the browser: every transition is re-validated by CORE.applyAction. */
 import CORE from "./core.js";
+import {resetDemo} from "./demo.js";
 
 const COOKIE = "fsb_session";
 const SESSION_DAYS = 14;
@@ -182,8 +183,9 @@ async function bookedStarts(env, exceptId) {
 function publicUrl(env, req) { return (env.PUBLIC_URL || new URL(req.url).origin).replace(/\/$/, ""); }
 
 /* Resolve template messages to addresses, then queue them. */
-async function queueMessages(env, base, o, msgs) {
+async function queueMessages(env, base, o, msgs, at) {
   if (!msgs.length) return [];
+  at = at || nowISO();
   const appraisers = (await env.DB.prepare("SELECT name,email,phone FROM users WHERE role='appraiser' AND active=1").all()).results || [];
   const cfg = await loadConfig(env);
   const pv = providers(env), emailOn = pv.email, smsOn = pv.sms;
@@ -205,13 +207,14 @@ async function queueMessages(env, base, o, msgs) {
         .replace(/\[ics\]/g, t.tok ? base + "/api/client/" + t.tok + "/appointment.ics" : portal);
       let status;
       const staff = ["desk", "appraiser", "officer"].includes(m.party);
-      if (!addr) status = staff ? "portal" : "manual";
+      if (env.DEMO) status = "demo";
+      else if (!addr) status = staff ? "portal" : "manual";
       else if (m.channel === "email") status = emailOn ? "queued" : (staff ? "portal" : "manual");
       else status = smsOn ? "queued" : "manual";
       const id = uid("m");
       out.push({id, status, channel: m.channel, to: t.name});
       stmts.push(env.DB.prepare("INSERT INTO messages (id,order_id,created_at,channel,party,to_name,to_addr,subject,body,template,status,attempts,last_error) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?)")
-        .bind(id, o.id, nowISO(), m.channel, m.party, s(t.name, 120), addr, s(m.subject || "", 200), body, m.template || "", status, addr ? null : ("No " + (m.channel === "sms" ? "mobile number" : "email") + " on file")));
+        .bind(id, o.id, at, m.channel, m.party, s(t.name, 120), addr, s(m.subject || "", 200), body, m.template || "", status, addr ? null : ("No " + (m.channel === "sms" ? "mobile number" : "email") + " on file")));
     }
   }
   if (stmts.length) await env.DB.batch(stmts);
@@ -222,8 +225,9 @@ async function writeEvents(env, orderId, events) {
   await env.DB.batch(events.map(e => env.DB.prepare("INSERT INTO events (order_id,at,who,role,what) VALUES (?,?,?,?,?)").bind(orderId, e.at, s(e.who, 120), s(e.role, 20), s(e.what, 3000))));
 }
 /* Apply one action with optimistic concurrency. Retries the whole read-apply-write on a version race. */
-async function runAction(env, req, ctx, orderId, action, params, actor, opts = {}) {
+async function runAction(env, base, ctx, orderId, action, params, actor, opts = {}) {
   const cfg = await loadConfig(env);
+  const at = opts.now || nowISO();
   for (let attempt = 0; attempt < 3; attempt++) {
     const row = await getOrderRow(env, orderId);
     if (!row) throw notFound("That order does not exist.");
@@ -235,7 +239,7 @@ async function runAction(env, req, ctx, orderId, action, params, actor, opts = {
     if (action === "deliver") p.hasReport = !!(await env.DB.prepare("SELECT 1 FROM docs WHERE order_id=? AND kind='report' AND deleted_at IS NULL LIMIT 1").bind(o.id).first());
     if (action === "reissue") { o.tokB = randomToken(22); o.tokA = randomToken(22); }
     let result;
-    try { result = CORE.applyAction(o, action, p, actor, cfg, nowISO()); }
+    try { result = CORE.applyAction(o, action, p, actor, cfg, at); }
     catch (e) { if (e && e.code) throw new ApiError(e.code === "forbidden" ? 403 : 409, e.code, e.msg || e.message); throw e; }
     const data = {...o}; ["id", "version", "step", "hold", "declined", "cancelled", "tokB", "tokA", "apptStart", "createdAt", "updatedAt", "docs", "events", "messages", "docCount", "hasReport", "unsent"].forEach(k => delete data[k]);
     const f = orderFields(o);
@@ -244,11 +248,44 @@ async function runAction(env, req, ctx, orderId, action, params, actor, opts = {
     if (!r.meta || r.meta.changes !== 1) continue; // lost the race, re-read and try again
     o.version = row.version + 1;
     await writeEvents(env, o.id, result.events);
-    const queued = await queueMessages(env, publicUrl(env, req), o, result.messages);
-    if (queued.some(q => q.status === "queued")) ctx.waitUntil(dispatch(env, 8));
+    const queued = await queueMessages(env, base, o, result.messages, at);
+    if (ctx && queued.some(q => q.status === "queued")) ctx.waitUntil(dispatch(env, 8));
     return {order: o, reply: result.reply, queued};
   }
   throw new ApiError(409, "busy", "The order is being changed by someone else. Try again.");
+}
+
+
+/* Create an order for a signed-in desk user. `at` lets the demo seed backdate. */
+async function createOrder(env, base, ctx, b, user, at) {
+  at = at || nowISO();
+  const role = user.role;
+  const addr = s(b.addr, 200); if (!addr) throw bad("A property address is required.");
+  if (!b.attestation) throw bad("The recusal attestation is required before an order can be placed.");
+  const o = {
+    addr, city: s(b.city, 120), loan: s(b.loan, 60), type: CORE.REPORT_TYPES.includes(b.type) ? b.type : CORE.REPORT_TYPES[0],
+    purpose: CORE.PURPOSES.includes(b.purpose) ? b.purpose : "Purchase", due: /^\d{4}-\d{2}-\d{2}$/.test(s(b.due, 10)) ? s(b.due, 10) : "",
+    fee: Number(b.fee) || 0, rush: !!b.rush, borrowerName: s(b.borrowerName, 120), borrowerPhone: s(b.borrowerPhone, 40), borrowerEmail: s(b.borrowerEmail, 120).toLowerCase(),
+    agentName: s(b.agentName, 120), agentPhone: s(b.agentPhone, 40), agentEmail: s(b.agentEmail, 120).toLowerCase(),
+    accessVia: CORE.ACCESS.includes(b.accessVia) ? b.accessVia : "Borrower", notes: s(b.notes, 2000),
+    officerName: s(b.officerName, 120), officerEmail: s(b.officerEmail, 120).toLowerCase(),
+    step: 0, hold: false, holdReason: "", declined: false, cancelled: false, clientContacted: false,
+    orderedBy: user.name, orderedByRole: CORE.ROLES[role].name, orderedByEmail: user.email, orderedById: user.id, orderedAt: at, attestation: true,
+    createdAt: at, updatedAt: at
+  };
+  if (o.borrowerEmail && !emailOk(o.borrowerEmail)) throw bad("The borrower email does not look right.");
+  if (o.agentEmail && !emailOk(o.agentEmail)) throw bad("The agent email does not look right.");
+  if (o.officerEmail && !emailOk(o.officerEmail)) throw bad("The loan officer email does not look right.");
+  const id = uid("o"), tokB = randomToken(22), tokA = randomToken(22);
+  const cfg = await loadConfig(env);
+  const data = {...o}; delete data.createdAt; delete data.updatedAt;
+  await env.DB.prepare("INSERT INTO orders (id,version,step,hold,declined,cancelled,tok_b,tok_a,appt_start,created_at,updated_at,data) VALUES (?,1,0,0,0,0,?,?,NULL,?,?,?)").bind(id, tokB, tokA, o.createdAt, o.updatedAt, JSON.stringify(data)).run();
+  o.id = id; o.tokB = tokB; o.tokA = tokA; o.version = 1;
+  await writeEvents(env, id, [{at, who: user.name, role, what: "Order created. Recusal attestation recorded."}]);
+  const msgs = CORE.templates.created(o, cfg).map(m => ({...m, template: "created"}));
+  const queued = await queueMessages(env, base, o, msgs, at);
+  if (ctx && queued.some(q => q.status === "queued")) ctx.waitUntil(dispatch(env, 8));
+  return o;
 }
 
 /* ---------- sending ---------- */
@@ -393,17 +430,27 @@ async function api(req, env, ctx) {
     }
     if (method === "POST" && ["book", "reschedule", "noslot", "consent"].includes(p(3))) {
       const body = await readJSON(req);
-      const r = await runAction(env, req, ctx, o.id, p(3), {slot: body.slot, note: s(body.note, 500), party}, actor);
+      const r = await runAction(env, publicUrl(env, req), ctx, o.id, p(3), {slot: body.slot, note: s(body.note, 500), party}, actor);
       return json({ok: true, reply: r.reply});
     }
     throw notFound();
+  }
+
+  /* --- demonstration copy: reload the sample data --- */
+  if (path === "/api/demo/reset" && method === "POST") {
+    if (!env.DEMO) throw notFound();
+    if (await limited(env, "demo:" + ip(req), 6, 60 * 60e3)) throw new ApiError(429, "rate", "The demo was reset recently. Try again in a while.");
+    const count = (await env.DB.prepare("SELECT COUNT(*) n FROM users").first()).n;
+    if (count > 0 && !(await currentUser(env, req))) throw new ApiError(401, "signin", "Sign in first.");
+    await resetDemo(env, publicUrl(env, req), {createOrder, runAction, setPassword, store, writeEvents, uid, randomToken, nowISO});
+    return json({ok: true}, 200, {"set-cookie": cookieHeader(req, "", 0)});
   }
 
   /* --- session state, setup, sign-in --- */
   if (path === "/api/session" && method === "GET") {
     const user = await currentUser(env, req);
     const count = (await env.DB.prepare("SELECT COUNT(*) n FROM users").first()).n;
-    const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv"};
+    const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv", demo: !!env.DEMO};
     if (user) out.config = await loadConfig(env);
     return json(out);
   }
@@ -591,31 +638,7 @@ async function api(req, env, ctx) {
     if (method === "POST" && !p(2)) {
       if (!CORE.can(role, "place")) throw denied("Only the appraisal desk places orders.");
       const b = await readJSON(req);
-      const addr = s(b.addr, 200); if (!addr) throw bad("A property address is required.");
-      if (!b.attestation) throw bad("The recusal attestation is required before an order can be placed.");
-      const o = {
-        addr, city: s(b.city, 120), loan: s(b.loan, 60), type: CORE.REPORT_TYPES.includes(b.type) ? b.type : CORE.REPORT_TYPES[0],
-        purpose: CORE.PURPOSES.includes(b.purpose) ? b.purpose : "Purchase", due: /^\d{4}-\d{2}-\d{2}$/.test(s(b.due, 10)) ? s(b.due, 10) : "",
-        fee: Number(b.fee) || 0, rush: !!b.rush, borrowerName: s(b.borrowerName, 120), borrowerPhone: s(b.borrowerPhone, 40), borrowerEmail: s(b.borrowerEmail, 120).toLowerCase(),
-        agentName: s(b.agentName, 120), agentPhone: s(b.agentPhone, 40), agentEmail: s(b.agentEmail, 120).toLowerCase(),
-        accessVia: CORE.ACCESS.includes(b.accessVia) ? b.accessVia : "Borrower", notes: s(b.notes, 2000),
-        officerName: s(b.officerName, 120), officerEmail: s(b.officerEmail, 120).toLowerCase(),
-        step: 0, hold: false, holdReason: "", declined: false, cancelled: false, clientContacted: false,
-        orderedBy: user.name, orderedByRole: CORE.ROLES[role].name, orderedByEmail: user.email, orderedById: user.id, orderedAt: nowISO(), attestation: true,
-        createdAt: nowISO(), updatedAt: nowISO()
-      };
-      if (o.borrowerEmail && !emailOk(o.borrowerEmail)) throw bad("The borrower email does not look right.");
-      if (o.agentEmail && !emailOk(o.agentEmail)) throw bad("The agent email does not look right.");
-      if (o.officerEmail && !emailOk(o.officerEmail)) throw bad("The loan officer email does not look right.");
-      const id = uid("o"), tokB = randomToken(22), tokA = randomToken(22);
-      const cfg = await loadConfig(env);
-      const data = {...o}; delete data.createdAt; delete data.updatedAt;
-      await env.DB.prepare("INSERT INTO orders (id,version,step,hold,declined,cancelled,tok_b,tok_a,appt_start,created_at,updated_at,data) VALUES (?,1,0,0,0,0,?,?,NULL,?,?,?)").bind(id, tokB, tokA, o.createdAt, o.updatedAt, JSON.stringify(data)).run();
-      o.id = id; o.tokB = tokB; o.tokA = tokA; o.version = 1;
-      await writeEvents(env, id, [{at: nowISO(), who: user.name, role, what: "Order created. Recusal attestation recorded."}]);
-      const msgs = CORE.templates.created(o, cfg).map(m => ({...m, template: "created"}));
-      const queued = await queueMessages(env, publicUrl(env, req), o, msgs);
-      if (queued.some(q => q.status === "queued")) ctx.waitUntil(dispatch(env, 8));
+      const o = await createOrder(env, publicUrl(env, req), ctx, b, user);
       return json({ok: true, order: o});
     }
     const id = s(p(2), 40);
@@ -633,7 +656,7 @@ async function api(req, env, ctx) {
       const b = await readJSON(req);
       const action = s(b.action, 20);
       if (!/^[a-z]+$/.test(action)) throw bad("Unknown action.");
-      const r = await runAction(env, req, ctx, id, action, b.params || {}, {name: user.name, role, id: user.id}, {from: b.from, version: b.version});
+      const r = await runAction(env, publicUrl(env, req), ctx, id, action, b.params || {}, {name: user.name, role, id: user.id}, {from: b.from, version: b.version});
       return json({ok: true, reply: r.reply, order: await orderDetail(env, r.order), queued: r.queued});
     }
     if (p(3) === "docs") {
@@ -745,6 +768,7 @@ export default {
   },
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
+      if (env.DEMO && event.cron === "0 8 * * *") { await resetDemo(env, (env.PUBLIC_URL || "").replace(/\/$/, ""), {createOrder, runAction, setPassword, store, writeEvents, uid, randomToken, nowISO}); return; }
       await dispatch(env, 50);
       await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(nowISO()).run();
       await env.DB.prepare("DELETE FROM ratelimit WHERE window_start < ?").bind(Date.now() - 864e5).run();

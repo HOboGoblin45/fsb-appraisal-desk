@@ -5,7 +5,7 @@
   var S = {
     me:null, view:"board", sel:null, tab:"status", orders:[], detail:{}, config:null, feedback:[], users:[], audit:[], messages:[],
     busy:false, toastT:null, boot:"loading", bootWhy:"", token:null, client:null, invite:null, inviteCode:null, provisioned:true,
-    providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv"
+    providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv", demo:false
   };
 
   /* ---------- helpers ---------- */
@@ -120,7 +120,9 @@
       return api("GET","/api/invite/"+encodeURIComponent(h.invite)).then(function(d){ S.invite=d; render(); }).catch(function(e){ S.invite={error:e.message}; render(); });
     }
     api("GET","/api/session").then(function(d){
-      S.boot="ready"; S.provisioned=d.provisioned!==false; S.providers=d.providers||S.providers; S.storage=d.storage||"kv";
+      S.boot="ready"; S.provisioned=d.provisioned!==false; S.providers=d.providers||S.providers; S.storage=d.storage||"kv"; S.demo=!!d.demo;
+      if(S.demo){ S.mfilter="all"; demoBar(); }
+      if(S.demo&&!S.provisioned){ render(); return api("POST","/api/demo/reset",{}).then(function(){ return api("GET","/api/session"); }).then(function(d2){ S.provisioned=d2.provisioned!==false; render(); }).catch(function(e){ S.boot="offline"; S.bootWhy=e.message; render(); }); }
       if(d.user) afterSignIn(d.user,d); else render();
     }).catch(function(e){ S.boot="offline"; S.bootWhy=e.message; render(); });
   }
@@ -140,7 +142,7 @@
     if(o.cancelled) cls="crit"; else if(o.declined) cls="crit"; else if(o.hold) cls="wait"; else if(o.step>=6) cls="ok"; else if(o.step===0) cls="crit";
     return '<span class="pill '+cls+'">'+esc(status(o))+'</span>'+(o.rush&&CORE.isOpen(o)?'<span class="flag">Rush</span>':'');
   }
-  function mpill(st){ var m={sent:"Sent",queued:"Sending",manual:"Needs sending",failed:"Failed",portal:"Seen in portal"}; return '<span class="pill '+esc(st)+'">'+esc(m[st]||st)+'</span>'; }
+  function mpill(st){ var m={sent:"Sent",queued:"Sending",manual:"Needs sending",failed:"Failed",portal:"Seen in portal",demo:"Composed (demo)"}; return '<span class="pill '+esc(st)+'">'+esc(m[st]||st)+'</span>'; }
   function timelineHtml(o){
     return '<ul class="tl">'+STEPS.map(function(s,i){
       var cls=i<o.step?"done":(i===o.step?"now":"pend");
@@ -165,7 +167,7 @@
   }
   function msgActions(m){
     var a=[];
-    if(m.status!=="sent"&&m.status!=="portal"){
+    if(m.status!=="sent"&&m.status!=="portal"&&m.status!=="demo"){
       if(m.channel==="email"&&m.to_addr) a.push('<a class="btn btn-s" href="'+esc(mailto(m))+'">Open in email app</a>');
       if(m.channel==="sms"&&m.to_addr) a.push('<a class="btn btn-s" href="'+esc(smsto(m))+'">Open in Messages</a>');
       a.push('<button class="btn btn-s" data-copy="'+esc((m.subject?m.subject+"\n\n":"")+m.body)+'" data-what="Message">Copy text</button>');
@@ -184,10 +186,28 @@
       msgActions(m)+'</div>';
   }
 
+  function demoBar(){
+    if(document.querySelector(".bar")) return;
+    var bar=document.createElement("div"); bar.className="bar";
+    bar.innerHTML='DEMONSTRATION <em>Sample people and orders. Nothing is sent to anyone. The data resets every night.</em>';
+    document.body.insertBefore(bar,document.body.firstChild);
+  }
+  var DEMO_ROLES=[["desk","Appraisal desk","Place and manage orders","desk@fsbdemo.apprifi.com"],["appraiser","Appraiser","Accept, schedule, deliver","appraiser@fsbdemo.apprifi.com"],["officer","Loan officer","Watch status, download the report","officer@fsbdemo.apprifi.com"],["admin","Bank administrator","People and settings","admin@fsbdemo.apprifi.com"]];
+  function demoSigninHtml(){
+    return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Try the portal</h2>'+
+      '<p class="note">This is a demonstration copy with sample orders at every stage. Pick who you want to be. Everyone sees the same live data, so open two browser windows to watch a change made by one person appear for another.</p></div></div>'+
+      '<div class="pb"><div class="stack-s">'+DEMO_ROLES.map(function(r){ return '<button class="btn btn-p" style="width:100%;justify-content:space-between;display:flex;text-align:left" data-demo="'+r[0]+'"><span><b>'+esc(r[1])+'</b><br><span style="font-weight:400;font-size:12.5px;opacity:.85">'+esc(r[2])+'</span></span><span aria-hidden="true">&rarr;</span></button>'; }).join("")+
+      '<p class="sm muted" style="margin-top:6px">To see what a borrower sees, sign in as the appraiser, open 812 N Roosevelt Ave, and use the Messages tab: the text to the borrower carries their personal link. Open it on your phone.</p>'+
+      '<p class="sm muted">Password for every demo account: <span class="mono">FSBdemo-2026</span>. Sign in at any time with the email addresses shown on the People tab.</p>'+
+      '</div></div></div><p class="brandline">First Security Bank &middot; Mackinaw, Heritage Lake, Deer Creek, Danvers</p></div>';
+  }
+
   /* ---------- entry screens ---------- */
   function signinHtml(){
     if(S.boot==="loading") return '<div class="panel"><div class="empty"><b>One moment</b>Connecting.</div></div>';
     if(S.boot==="offline") return '<div class="panel"><div class="empty"><b>Cannot reach the server</b>'+esc(S.bootWhy||"")+'<div style="margin-top:10px"><button class="btn btn-s" data-a="retry">Try again</button></div></div></div>';
+    if(S.demo&&!S.provisioned) return '<div class="panel"><div class="empty"><b>Loading the demonstration</b>Sample orders are being prepared. One moment.</div></div>';
+    if(S.demo) return demoSigninHtml();
     if(!S.provisioned) return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Not yet in service</h2>'+
       '<p class="note">This portal has been installed for First Security Bank but the bank has not yet designated its administrator. Once the bank names that person, they receive an invitation, set their password, and add everyone else.</p></div></div></div></div>';
     return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Sign in</h2>'+
@@ -225,7 +245,7 @@
           '<button class="btn btn-s" data-uactive="'+esc(r.id)+'" data-to="'+(r.active?"0":"1")+'">'+(r.active?"Suspend":"Restore")+'</button>')+'</div></td></tr>';
     }).join("");
     return '<div class="panel"><div class="ph"><div><h2>People</h2>'+
-      '<p class="note">Everyone who can sign in, and what they may do. Adding someone produces a one-time sign-in link that lasts seven days; send it to them yourself. The same button resets a forgotten password.</p></div>'+
+      '<p class="note">Everyone who can sign in, and what they may do. Adding someone produces a one-time sign-in link that lasts seven days; send it to them yourself. The same button resets a forgotten password.'+(S.demo?' In this demonstration every sample account uses the password FSBdemo-2026.':'')+'</p></div>'+
       '<button class="btn btn-p" data-a="addperson">Add someone</button></div>'+
       (rows?'<div class="tablewrap"><table><thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Last seen</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<div class="empty"><b>Loading</b></div>')+
       '<div class="pb"><div class="callout"><b>Roles.</b> '+Object.keys(ROLES).map(function(k){ return '<b>'+esc(ROLES[k].name)+'</b>: '+esc(ROLES[k].hint); }).join(" ")+'</div></div></div>'+
@@ -473,7 +493,7 @@
   /* ---------- outbox ---------- */
   function outboxHtml(){
     var fs=[["manual","Needs sending"],["queued","Sending"],["sent","Sent"],["failed","Failed"],["portal","Staff notices"],["all","All"]];
-    var prov='<div class="callout'+(S.providers.email?"":" warn")+'"><b>Email: '+(S.providers.email?("sending automatically"+(S.providers.emailVia==="cloudflare"?" through Cloudflare Email Service.":".")):"not connected yet.")+'</b> '+(S.providers.email?"Queued messages go out within a few seconds and retry for up to half an hour if the mail service is down.":"Until the mail service key is added, every email below has an \"Open in email app\" button that drafts it in Outlook or Gmail for you; press send there, then mark it sent here.")+
+    var prov=S.demo?'<div class="callout"><b>Demonstration.</b> These are the real texts and emails the portal composes at each step, addressed to the sample people. In this copy nothing is delivered; in service they send automatically, and the appraiser and the desk are copied on the notices meant for them.</div>':'<div class="callout'+(S.providers.email?"":" warn")+'"><b>Email: '+(S.providers.email?("sending automatically"+(S.providers.emailVia==="cloudflare"?" through Cloudflare Email Service.":".")):"not connected yet.")+'</b> '+(S.providers.email?"Queued messages go out within a few seconds and retry for up to half an hour if the mail service is down.":"Until the mail service key is added, every email below has an \"Open in email app\" button that drafts it in Outlook or Gmail for you; press send there, then mark it sent here.")+
       ' <b>Texts: '+(S.providers.sms?"sending automatically.":"by hand.")+'</b> '+(S.providers.sms?"":"US carriers require A2P 10DLC registration before software can text; until that clears, \"Open in Messages\" drafts the text on a phone.")+
       (S.providers.email?"":" Notices to bank staff and the appraiser are not queued while email is off, because everyone sees the same live board; they sit under Staff notices for the record.")+'</div>';
     return '<div class="panel"><div class="ph"><div><h2>Outbox</h2><p class="note">Every email and text the system composes, with its real wording and where it stands. Nothing here is hidden from you.</p></div></div>'+
@@ -555,7 +575,7 @@
     }
     fbtn.hidden=false;
     who.innerHTML='<button class="chip act" data-a="menu" aria-haspopup="true" aria-expanded="'+S.menu+'"><b>'+esc(S.me.name)+'</b> &middot; '+esc((ROLES[S.me.role]||{}).name||S.me.role)+'</button>'+
-      (S.menu?'<div class="menu" data-stop="1"><button data-a="changepw">Change my password</button><button data-a="signout">Sign out</button></div>':'');
+      (S.menu?'<div class="menu" data-stop="1">'+(S.demo?'<button data-a="demoreset">Reset the demonstration</button>':'<button data-a="changepw">Change my password</button>')+'<button data-a="signout">Sign out</button></div>':'');
     nav.innerHTML=navFor(S.me.role).map(function(i){ return '<button role="tab" data-v="'+i[0]+'" aria-selected="'+(S.view===i[0])+'">'+esc(i[1])+'</button>'; }).join("");
 
     var v=S.view, html="";
@@ -706,7 +726,7 @@
   document.addEventListener("keydown",function(e){ if(e.key==="Escape"){ if($("modal").innerHTML){ modal(""); } if(S.menu){ S.menu=false; render(); } } });
 
   document.addEventListener("click",function(e){
-    var t=e.target.closest("[data-stop],[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-copyoff],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel]");
+    var t=e.target.closest("[data-stop],[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-copyoff],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel],[data-demo]");
     if(S.menu&&!(t&&t.dataset.a==="menu")&&!(t&&t.dataset.stop)){ S.menu=false; render(); if(!t) return; t=e.target.closest("[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-copyoff],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel]"); if(!t) return; }
     if(!t) return;
     if(t.dataset.stop&&!t.dataset.a) return;
@@ -728,6 +748,9 @@
     if(t.dataset.ddel){ if(!confirm("Remove "+t.dataset.name+" from this order? It stays in storage for the record.")) return; api("DELETE","/api/orders/"+encodeURIComponent(o.id)+"/docs/"+encodeURIComponent(t.dataset.ddel)).then(function(){ toast("Removed."); return loadDetail(o.id); }).catch(fail); return; }
     if(t.dataset.adv){ if(!o){ toast("Open an order first."); return; } var from=Number(t.dataset.from); if(from!==o.step){ toast("This order already moved to <b>"+esc(status(o))+"</b>."); loadDetail(o.id).catch(function(){}); return; } advance(o,t.dataset.adv,from); return; }
 
+    if(t.dataset.demo){ var dr=DEMO_ROLES.filter(function(x){ return x[0]===t.dataset.demo; })[0]; if(!dr||S.busy) return; S.busy=true;
+      api("POST","/api/login",{email:dr[3],password:"FSBdemo-2026"}).then(function(d){ return api("GET","/api/session").then(function(sd){ afterSignIn(d.user,sd); toast("You are <b>"+esc(d.user.name)+"</b>, "+esc(ROLES[d.user.role].name.toLowerCase())+"."); }); }).catch(fail).then(function(){ S.busy=false; }); return; }
+    if(a==="demoreset"){ if(!confirm("Reload the sample data? Everything anyone changed in the demonstration goes back to the starting point and you will be signed out.")) return; api("POST","/api/demo/reset",{}).then(function(){ location.reload(); }).catch(fail); return; }
     if(a==="menu"){ S.menu=!S.menu; render(); return; }
     if(a==="closesheet"){ modal(""); return; }
     if(a==="retry"){ S.boot="loading"; render(); boot(); return; }

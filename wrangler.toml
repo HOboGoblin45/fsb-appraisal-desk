@@ -49,3 +49,37 @@ crons = ["*/5 * * * *"]
 
 # Secrets (never in this file): npx wrangler secret put AUTH_SECRET
 # Optional: RESEND_API_KEY (if not using Cloudflare Email Service), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM
+
+# ---------------------------------------------------------------------------
+# Demonstration copy at https://fsbdemo.apprifi.com: same code, its own database and storage,
+# sample people and orders, nothing sent, reset nightly. Deploy with: npx wrangler deploy --env demo
+[env.demo]
+name = "fsb-appraisal-desk-demo"
+workers_dev = false
+routes = [
+  { pattern = "fsbdemo.apprifi.com", custom_domain = true }
+]
+
+[env.demo.assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/f/*"]
+
+[env.demo.vars]
+PUBLIC_URL = "https://fsbdemo.apprifi.com"
+DEMO = "1"
+PBKDF2_ITER = "1000"
+
+[[env.demo.d1_databases]]
+binding = "DB"
+database_name = "fsb-portal-demo"
+database_id = "a438ae7f-9794-418f-b2b6-baab86b168ab"
+migrations_dir = "migrations"
+
+[[env.demo.kv_namespaces]]
+binding = "FILES"
+id = "1702a8c6c5f84468928894317b427623"
+
+[env.demo.triggers]
+crons = ["0 8 * * *"]

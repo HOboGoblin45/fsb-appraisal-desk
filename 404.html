@@ -1381,7 +1381,7 @@
     (o.docs||[]).forEach(function(d){ L.push("  "+d.at+"  "+d.name+"  ("+kb(d.size)+")  uploaded by "+d.by); });
     if(!(o.docs||[]).length) L.push("  none");
     L.push("");
-    L.push("ACTIVITY, APPEND ONLY");
+    L.push("ACTIVITY");
     (o.log||[]).forEach(function(e){ L.push("  "+e.t+"  "+e.who+"  "+e.what); });
     L.push("");
     L.push("MESSAGES ISSUED");

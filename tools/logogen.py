@@ -7,7 +7,7 @@ Parametric, vector-first. Every mark is drawn from a few numbers on a 100x100 gr
     python3 tools/logogen.py sheet            -> tools/out/sheet.png     every concept, for choosing
     python3 tools/logogen.py build <concept>  -> public/apprifi-*.svg, favicons, og image, site copies
 
-Concepts: checkA, roofbar, houserail, tile, ligature, pin
+Concepts: aframe (the house stands in for the A of the wordmark), checkA, roofbar, houserail, tile, ligature, pin
 Palette: navy #12324f, orange #d4652a (override with --navy/--orange).
 """
 import sys, os, math, argparse, io
@@ -68,7 +68,14 @@ def pin(navy, orange):
     door = f'<rect x="45" y="48" width="10" height="16" rx="2" fill="{orange}"/>'
     return body + roof + door
 
-CONCEPTS = {"checkA": checkA, "roofbar": roofbar, "houserail": houserail, "tile": tile, "ligature": ligature, "pin": pin}
+def aframe(navy, orange):
+    """An A-frame house: steep rafters to the ground, a loft beam as the crossbar, an orange door."""
+    rafters = stroke("M14 88 L50 14 L86 88", navy, 17)
+    beam = stroke("M30 60 L70 60", navy, 14, cap="butt")
+    door = f'<rect x="42" y="70" width="16" height="26" rx="3" fill="{orange}"/>'
+    return rafters + beam + door
+
+CONCEPTS = {"aframe": aframe, "checkA": checkA, "roofbar": roofbar, "houserail": houserail, "tile": tile, "ligature": ligature, "pin": pin}
 
 def mark_svg(concept, navy, orange, size=100, bg=None, pad=0):
     inner = CONCEPTS[concept](navy, orange)
@@ -77,6 +84,7 @@ def mark_svg(concept, navy, orange, size=100, bg=None, pad=0):
             f'{bgrect}{inner}</svg>')
 
 # ---------- wordmark as outlines ----------
+CAP = 712 / 1000  # PT Serif Bold cap height, em units
 def wordmark_path(text="Apprifi", size=100, tracking=-0.5):
     """Returns (path_d, advance_width) for text set at `size` px, baseline at y=0, using PT Serif Bold outlines."""
     font = TTFont(FONT)
@@ -90,6 +98,24 @@ def wordmark_path(text="Apprifi", size=100, tracking=-0.5):
         parts.append(pen.getCommands())
         x += gs[gname].width * scale + tracking
     return " ".join(parts), x - tracking
+
+def lockup_house_svg(navy, orange, text_color=None, size=34, h=40):
+    """The A-frame house stands in for the capital A of the wordmark: house, then "pprifi" in outlines."""
+    text_color = text_color or navy
+    d, adv = wordmark_path("pprifi", size=size, tracking=-0.4)
+    cap = size * CAP
+    # the house's 100-grid spans y 6..96 (stroke included); scale so that span equals the cap height plus a hair
+    s = (cap * 1.1) / 92
+    baseline = (h + cap) / 2
+    house_w = 100 * s
+    top = baseline - 96.5 * s  # the rafters' feet (grid y 96.5, stroke included) stand on the baseline
+    gap = size * 0.04
+    w = house_w + gap + adv + 1
+    inner = aframe(navy, orange)
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h}" viewBox="0 0 {w:.1f} {h}" role="img" aria-label="Apprifi">'
+            f'<title>Apprifi</title>'
+            f'<g transform="translate(0 {top:.2f}) scale({s:.4f})">{inner}</g>'
+            f'<path transform="translate({house_w+gap:.2f} {baseline:.2f})" d="{d}" fill="{text_color}"/></svg>')
 
 def lockup_svg(concept, navy, orange, text_color=None, mark=40, gap=12, size=None):
     """Horizontal lockup: mark at `mark` px tall, wordmark to its right, baseline aligned."""
@@ -131,9 +157,10 @@ def sheet(navy, orange):
 
 def build(concept, navy, orange):
     pub = os.path.join(ROOT, "public"); site = os.path.join(ROOT, "site", "public")
+    house = concept == "aframe"
     files = {
-        "apprifi-logo.svg": lockup_svg(concept, navy, orange, mark=40),
-        "apprifi-logo-white.svg": lockup_svg(concept, "#ffffff", orange, text_color="#ffffff", mark=40),
+        "apprifi-logo.svg": lockup_house_svg(navy, orange) if house else lockup_svg(concept, navy, orange, mark=40),
+        "apprifi-logo-white.svg": lockup_house_svg("#ffffff", orange, text_color="#ffffff") if house else lockup_svg(concept, "#ffffff", orange, text_color="#ffffff", mark=40),
         "apprifi-mark.svg": mark_svg(concept, navy, orange, size=40),
         "apprifi-mark-tile.svg": mark_svg(concept, "#ffffff", orange, size=40, bg=navy),
     }

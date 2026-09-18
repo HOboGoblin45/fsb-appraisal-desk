@@ -1,0 +1,22 @@
+
+ ⛅️ wrangler 4.132.0 (update available 4.134.0)
+───────────────────────────────────────────────
+Resource location: remote 
+
+Migrations to be applied:
+┌───────────────────┐
+│ name              │
+├───────────────────┤
+│ 0003_delivery.sql │
+└───────────────────┘
+? About to apply 1 migration(s)
+Your database may not be available to serve requests during the migration, continue?
+🤖 Using fallback value in non-interactive context: yes
+🌀 Executing on remote database fsb-portal (6b6807bb-e4e0-4f1c-9f97-9cc98abb1262):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 9 commands in 1.82ms
+┌───────────────────┬────────┐
+│ name              │ status │
+├───────────────────┼────────┤
+│ 0003_delivery.sql │ ✅     │
+└───────────────────┴────────┘

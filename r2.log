@@ -1,0 +1,10 @@
+
+ ⛅️ wrangler 4.132.0 (update available 4.134.0)
+───────────────────────────────────────────────
+Creating bucket 'fsb-portal-docs'...
+✅ Created bucket 'fsb-portal-docs' with default storage class of Standard.
+To access your new R2 Bucket in your Worker, add the following snippet to your configuration file:
+[[r2_buckets]]
+bucket_name = "fsb-portal-docs"
+binding = "fsb_portal_docs"
+

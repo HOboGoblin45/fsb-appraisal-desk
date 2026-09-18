@@ -1,0 +1,8 @@
+AUTH_SECRET=local-dev-only-secret-not-for-production-0123456789
+PUBLIC_URL=http://127.0.0.1:8788
+DEBUG=1
+DEMO=1
+PBKDF2_ITER=1000
+LENDER_NAME=Prairie Community Bank
+LENDER_SHORT=PCB
+LENDER_TAGLINE=Pontiac, Fairbury and Chenoa

@@ -188,10 +188,25 @@ function orderFields(o) {
 async function getOrderRow(env, id) {
   return env.DB.prepare("SELECT * FROM orders WHERE id=?").bind(id).first();
 }
-async function listOrders(env, since) {
-  const q = since
-    ? env.DB.prepare("SELECT * FROM orders WHERE updated_at > ? ORDER BY created_at DESC").bind(since)
-    : env.DB.prepare("SELECT * FROM orders ORDER BY created_at DESC");
+/* An appraiser sees only the orders the client assigned to them. The client decides who gets the work; this portal
+   never does. But "no say in the assignment" is not the same as "no sight of it", and the portal is operated by a
+   practising appraiser, so one appraiser's orders, fees, contacts, documents and messages are kept out of every
+   other appraiser's account here in the query layer rather than in the interface. mineOnly() returns the id to
+   scope to, or "" for client-side roles, who see the whole board by design. */
+function mineOnly(user) { return user && user.role === "appraiser" ? String(user.id) : ""; }
+function gateOrder(o, user) {
+  const mine = mineOnly(user);
+  /* notFound, not denied: a competitor's order should not be confirmed to exist. */
+  if (mine && String(o.assignedTo || "") !== mine) throw notFound("That order does not exist.");
+  return o;
+}
+
+async function listOrders(env, since, mine) {
+  const where = [], args = [];
+  if (since) { where.push("updated_at > ?"); args.push(since); }
+  if (mine) { where.push("assigned_to = ?"); args.push(mine); }
+  const st = env.DB.prepare("SELECT * FROM orders" + (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY created_at DESC");
+  const q = args.length ? st.bind(...args) : st;
   const rows = (await q.all()).results || [];
   const orders = rows.map(rowToOrder);
   if (!orders.length) return orders;
@@ -751,7 +766,12 @@ async function api(req, env, ctx) {
     const user = await currentUser(env, req);
     const count = (await env.DB.prepare("SELECT COUNT(*) n FROM users").first()).n;
     const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv", demo: !!env.DEMO, brand: await loadBrand(env), clientType: CORE.clientType().key};
-    if (user) { out.config = await loadConfig(env, user.role === "appraiser" ? user.id : undefined); out.appraisers = (await env.DB.prepare("SELECT id,name FROM users WHERE role='appraiser' AND active=1 ORDER BY name").all()).results || []; }
+    if (user) {
+      out.config = await loadConfig(env, user.role === "appraiser" ? user.id : undefined);
+      /* The panel list drives the client's assign control. An appraiser has no assign control and no business
+         with the roster, so their session does not carry it. */
+      out.appraisers = mineOnly(user) ? [] : (await env.DB.prepare("SELECT id,name FROM users WHERE role='appraiser' AND active=1 ORDER BY name").all()).results || [];
+    }
     return json(out);
   }
   if (path === "/api/brand" && method === "GET") return json({brand: await loadBrand(env)});
@@ -967,7 +987,10 @@ async function api(req, env, ctx) {
 
   /* --- feedback --- */
   if (path === "/api/feedback") {
-    if (method === "GET") return json({feedback: (await env.DB.prepare("SELECT * FROM feedback ORDER BY at DESC LIMIT 500").all()).results || []});
+    /* Feedback is the client's staff talking about their own work. An appraiser sees only what they wrote. */
+    if (method === "GET") return json({feedback: (mineOnly(user)
+      ? (await env.DB.prepare("SELECT * FROM feedback WHERE role='appraiser' AND who=? ORDER BY at DESC LIMIT 500").bind(user.name).all()).results
+      : (await env.DB.prepare("SELECT * FROM feedback ORDER BY at DESC LIMIT 500").all()).results) || []});
     if (method === "POST") {
       const b = await readJSON(req); const text = s(b.text, 4000);
       if (!text) throw bad("Write a note first.");
@@ -985,15 +1008,22 @@ async function api(req, env, ctx) {
   /* --- inbound replies that could not be matched to an order (desk and admin) --- */
   if (path === "/api/inbound" && method === "GET") {
     if (!CORE.can(role, "outbox")) throw denied();
+    /* Unmatched client replies are the client's triage queue, not an appraiser's. */
+    if (mineOnly(user)) throw denied("Unmatched replies are handled by the " + CORE.ROLES.desk.name.toLowerCase() + ".");
     return json({inbound: (await env.DB.prepare("SELECT id,at,channel,from_addr,from_name,order_id,subject,body,handled FROM inbound ORDER BY at DESC LIMIT 200").all()).results || []});
   }
 
   /* --- outbox --- */
   if (p(1) === "messages") {
     if (method === "GET" && !p(2)) {
-      const st = url.searchParams.get("status");
-      const q = st ? env.DB.prepare("SELECT m.*, o.data FROM messages m LEFT JOIN orders o ON o.id=m.order_id WHERE m.status=? ORDER BY m.created_at DESC LIMIT 300").bind(st)
-                   : env.DB.prepare("SELECT m.*, o.data FROM messages m LEFT JOIN orders o ON o.id=m.order_id ORDER BY m.created_at DESC LIMIT 300");
+      const st = url.searchParams.get("status"), mine = mineOnly(user);
+      const where = [], args = [];
+      if (st) { where.push("m.status=?"); args.push(st); }
+      /* An appraiser's outbox is the mail and texts sent about their own orders. Nothing else. */
+      if (mine) { where.push("o.assigned_to=?"); args.push(mine); }
+      const stmt = env.DB.prepare("SELECT m.*, o.data FROM messages m LEFT JOIN orders o ON o.id=m.order_id" +
+        (where.length ? " WHERE " + where.join(" AND ") : "") + " ORDER BY m.created_at DESC LIMIT 300");
+      const q = args.length ? stmt.bind(...args) : stmt;
       const rows = (await q.all()).results || [];
       return json({messages: rows.map(r => { let addr = ""; try { const d = JSON.parse(r.data); addr = d.addr; } catch (e) {} const {data, ...m} = r; m.order_addr = addr || (m.kind === "system" ? "System" : ""); return m; })});
     }
@@ -1019,7 +1049,7 @@ async function api(req, env, ctx) {
 
   /* --- orders --- */
   if (p(1) === "orders") {
-    if (method === "GET" && !p(2)) return json({orders: await listOrders(env, url.searchParams.get("since") || ""), time: nowISO()});
+    if (method === "GET" && !p(2)) return json({orders: await listOrders(env, url.searchParams.get("since") || "", mineOnly(user)), time: nowISO()});
     if (method === "POST" && !p(2)) {
       if (!CORE.can(role, "place")) throw denied("Only the appraisal desk places orders.");
       const b = await readJSON(req);
@@ -1030,23 +1060,24 @@ async function api(req, env, ctx) {
     if (!id) throw notFound();
     if (method === "GET" && !p(3)) {
       const row = await getOrderRow(env, id); if (!row) throw notFound("That order does not exist.");
-      return json({order: await orderDetail(env, rowToOrder(row))});
+      return json({order: await orderDetail(env, gateOrder(rowToOrder(row), user))});
     }
     if (method === "GET" && p(3) === "log.txt") {
       const row = await getOrderRow(env, id); if (!row) throw notFound();
-      const o = await orderDetail(env, rowToOrder(row));
+      const o = await orderDetail(env, gateOrder(rowToOrder(row), user));
       return new Response(logText(o, await loadConfig(env)), {headers: {"content-type": "text/plain; charset=utf-8", "content-disposition": contentDisposition("independence-record-" + id.slice(0, 12) + ".txt"), "cache-control": "no-store"}});
     }
     if (method === "POST" && p(3) === "actions") {
       const b = await readJSON(req);
       const action = s(b.action, 20);
       if (!/^[a-z]+$/.test(action)) throw bad("Unknown action.");
+      if (mineOnly(user)) { const row = await getOrderRow(env, id); if (!row) throw notFound("That order does not exist."); gateOrder(rowToOrder(row), user); }
       const r = await runAction(env, publicUrl(env, req), ctx, id, action, b.params || {}, {name: user.name, role, id: user.id}, {from: b.from, version: b.version});
       return json({ok: true, reply: r.reply, order: await orderDetail(env, r.order), queued: r.queued});
     }
     if (p(3) === "docs") {
       const row = await getOrderRow(env, id); if (!row) throw notFound("That order does not exist.");
-      const o = rowToOrder(row);
+      const o = gateOrder(rowToOrder(row), user);
       if (method === "POST" && !p(4)) {
         if (!CORE.can(role, "docs")) throw denied("Your role cannot upload documents.");
         if (o.cancelled) throw bad("This order was cancelled.");
@@ -1149,6 +1180,7 @@ async function fileRoute(req, env) {
   } else {
     const user = await currentUser(env, req);
     if (!user) throw new ApiError(401, "signin", "Please sign in.");
+    if (mineOnly(user)) { const row = await getOrderRow(env, d.order_id); if (!row) throw notFound("That file is not available."); gateOrder(rowToOrder(row), user); }
     if (user.role === "officer" && !["report", "addendum", "invoice"].includes(d.kind)) throw denied(CORE.ROLES.officer.name + "s can open the finished report and invoice only.");
     // downloads of the other side's documents go on the record (an appraiser opening their own report does not)
     if (user.role !== d.uploaded_role) await writeEvents(env, d.order_id, [{at: nowISO(), who: user.name, role: user.role, what: "Downloaded " + d.name + "."}]);

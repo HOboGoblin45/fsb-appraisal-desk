@@ -1,0 +1,32 @@
+
+ ⛅️ wrangler 4.132.0 (update available 4.134.0)
+───────────────────────────────────────────────
+Resource location: remote 
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mProcessing wrangler.toml configuration:[0m
+
+  
+    - "env.demo" environment configuration
+      - The following vars exist at the top level, but not on "env.demo.vars".
+        This is probably not what you want, since "vars" configuration is not inherited by environments.
+        Please add these vars to "env.demo.vars":
+        - VENDOR_EMAIL
+
+
+Migrations to be applied:
+┌───────────────────┐
+│ name              │
+├───────────────────┤
+│ 0003_delivery.sql │
+└───────────────────┘
+? About to apply 1 migration(s)
+Your database may not be available to serve requests during the migration, continue?
+🤖 Using fallback value in non-interactive context: yes
+🌀 Executing on remote database fsb-portal-demo (a438ae7f-9794-418f-b2b6-baab86b168ab):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 9 commands in 2.34ms
+┌───────────────────┬────────┐
+│ name              │ status │
+├───────────────────┼────────┤
+│ 0003_delivery.sql │ ✅     │
+└───────────────────┴────────┘

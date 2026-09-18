@@ -43,7 +43,8 @@ function client() {
   r = await desk.post("/api/orders", {...body, assignedTo: alex.id}); ok(r.status === 200 && r.data.order.assignedName === "Alex Second" && r.data.order.units === 3 && r.data.order.loanType === "Portfolio / in-house" && r.data.order.combinedReport === true, "order placed with v2 fields and assigned to Alex");
   const oid = r.data.order.id, tokB = r.data.order.tokB;
   r = await desk.get("/api/orders/" + oid); ok(r.data.order.messages.filter(m => m.party === "appraiser").length === 1 && /Assigned to Alex Second/.test(r.data.order.messages[0].body) && /Portfolio/.test(r.data.order.messages[0].body), "creation notice goes only to the assigned appraiser and carries the assignment facts");
-  r = await apr.post("/api/orders/" + oid + "/actions", {action: "accept", from: 0, params: {fee: 700, etaDate: "2026-10-05", note: "Fee includes rent schedule"}}); ok(r.status === 200 && r.data.order.etaDate === "2026-10-05" && r.data.order.assignedName === "Alex Second", "acceptance records fee, delivery date and note (assignment unchanged)");
+  r = await apr.post("/api/orders/" + oid + "/actions", {action: "accept", from: 0, params: {fee: 700}}); ok(r.status === 404, "Sam cannot act on an order assigned to Alex");
+  r = await apr2.post("/api/orders/" + oid + "/actions", {action: "accept", from: 0, params: {fee: 700, etaDate: "2026-10-05", note: "Fee includes rent schedule"}}); ok(r.status === 200 && r.data.order.etaDate === "2026-10-05" && r.data.order.assignedName === "Alex Second", "acceptance records fee, delivery date and note (assignment unchanged)");
   ok(r.data.order.messages.some(m => m.template === "accepted" && /expected delivery Oct 5/.test(m.body) && /rent schedule/.test(m.body)), "desk notice carries the commitment");
   r = await desk.post("/api/orders/" + oid + "/actions", {action: "assign", params: {userId: "nobody"}}); ok(r.status === 400, "assigning to an unknown appraiser is refused");
   r = await desk.post("/api/orders/" + oid + "/actions", {action: "assign", params: {userId: alex.id}}); ok(r.status === 200 && /Reassigned|Assigned/.test(r.data.reply), "reassign works: " + r.data.reply);
@@ -81,5 +82,32 @@ function client() {
   r = await desk.get("/api/orders/" + oid + "/log.txt"); ok(/Assigned appraiser: Alex Second/.test(r.data) && /Reviewer: Matt Reviewer \(signed/.test(r.data) && /Preliminary figures released/.test(r.data) && /Revisions: 1/.test(r.data) && /Payment: 700 by Check ref 1042/.test(r.data) && /Client: Prairie Community Bank/.test(r.data), "independence record carries every v2 fact under the lender's name");
   r = await apr2.patch("/api/me", {phone: "(309) 555-0200", licenseNo: "556.000000", licenseState: "IL", licenseExpires: "2026-09-30", eoExpires: "2027-03-01", eoCarrier: "Landy"}); ok(r.status === 200, "appraiser saves credentials");
   r = await admin.get("/api/users"); ok(r.data.users.find(u => u.email === "alex@example.com").license_expires === "2026-09-30", "administrator sees credential dates");
+
+  console.log("appraiser isolation (the client assigns; one appraiser never sees another's work)");
+  r = await apr.get("/api/orders"); const samSees = r.data.orders;
+  ok(r.status === 200 && samSees.length > 0 && samSees.every(o => o.assignedName !== "Alex Second"), "Sam's board holds none of Alex's orders (" + samSees.length + " of his own)");
+  r = await apr2.get("/api/orders");
+  ok(r.data.orders.length === 1 && r.data.orders[0].id === oid, "Alex's board holds only the order assigned to Alex");
+  r = await desk.get("/api/orders"); const all = r.data.orders.length;
+  ok(all === samSees.length + 1, "the client still sees every order (" + all + ")");
+  r = await apr.get("/api/orders/" + oid); ok(r.status === 404, "Sam cannot open Alex's order, and is not told it exists");
+  r = await apr.get("/api/orders/" + oid + "/log.txt"); ok(r.status === 404, "Sam cannot pull the record of Alex's order");
+  const sfd = new FormData(); sfd.append("kind", "report"); sfd.append("file", new Blob(["%PDF-1.4 x"], {type: "application/pdf"}), "not-mine.pdf");
+  r = await apr.post("/api/orders/" + oid + "/docs", sfd); ok(r.status === 404, "Sam cannot upload to Alex's order");
+  r = await apr2.get("/api/orders/" + oid); const alexDoc = r.data.order.docs.find(d => d.kind === "report");
+  r = await apr.get("/f/" + oid + "/" + alexDoc.id, {raw: true}); ok(r.status === 404, "Sam cannot download a document from Alex's order");
+  r = await apr2.get("/f/" + oid + "/" + alexDoc.id, {raw: true}); ok(r.status === 200, "Alex can download it");
+  r = await apr.get("/api/messages"); ok(r.status === 200 && r.data.messages.every(m => m.order_id !== oid), "Sam's outbox carries no message from Alex's order");
+  r = await apr2.get("/api/messages"); ok(r.data.messages.length > 0 && r.data.messages.every(m => m.order_id === oid), "Alex's outbox carries only Alex's order");
+  r = await desk.get("/api/messages"); ok(r.data.messages.some(m => m.order_id === oid) && r.data.messages.some(m => m.kind === "system"), "the client's outbox is unchanged and still carries system mail");
+  r = await apr.get("/api/inbound"); ok(r.status === 403, "unmatched client replies stay with the client");
+  r = await desk.get("/api/inbound"); ok(r.status === 200, "the desk still triages them");
+  await apr.post("/api/feedback", {kind: "Note", text: "sam note", screen: "queue"});
+  await desk.post("/api/feedback", {kind: "Note", text: "desk note", screen: "board"});
+  r = await apr.get("/api/feedback"); ok(r.status === 200 && r.data.feedback.length === 1 && r.data.feedback[0].text === "sam note", "an appraiser reads back only their own feedback");
+  r = await admin.get("/api/feedback"); ok(r.data.feedback.length >= 2, "the client reads all of it");
+  r = await apr.get("/api/session"); ok(Array.isArray(r.data.appraisers) && r.data.appraisers.length === 0, "an appraiser's session carries no panel roster");
+  r = await desk.get("/api/session"); ok(r.data.appraisers.length === 2, "the client's session still carries the roster");
+
   console.log("\n" + pass + " passed, " + fail + " failed"); process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(2); });

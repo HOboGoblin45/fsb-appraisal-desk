@@ -1,0 +1,23 @@
+
+ ⛅️ wrangler 4.132.0 (update available 4.134.0)
+───────────────────────────────────────────────
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mProcessing wrangler.toml configuration:[0m
+
+  
+    - "env.demo" environment configuration
+      - The following vars exist at the top level, but not on "env.demo.vars".
+        This is probably not what you want, since "vars" configuration is not inherited by environments.
+        Please add these vars to "env.demo.vars":
+        - VENDOR_EMAIL
+        - MAIL_FROM
+        - MAIL_INBOUND
+      - "send_email" exists at the top level, but not on "env.demo".
+        This is not what you probably want, since "send_email" is not inherited by environments.
+        Please add "send_email" to "env.demo".
+      - "r2_buckets" exists at the top level, but not on "env.demo".
+        This is not what you probably want, since "r2_buckets" is not inherited by environments.
+        Please add "r2_buckets" to "env.demo".
+
+
+🌀 Creating the secret for the Worker "apprifi-demo"
+✨ Success! Uploaded secret AUTH_SECRET

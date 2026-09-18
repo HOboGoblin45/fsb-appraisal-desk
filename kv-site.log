@@ -1,0 +1,12 @@
+
+ ⛅️ wrangler 4.132.0 (update available 4.134.0)
+───────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Creating namespace with title "SITE"
+✨ Success!
+To access your new KV Namespace in your Worker, add the following snippet to your configuration file:
+[[kv_namespaces]]
+binding = "SITE"
+id = "b97ea582d90b487db090fcc49d2e9b8d"
+

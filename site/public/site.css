@@ -217,3 +217,9 @@ footer .fine{margin-top:26px;padding-top:18px;border-top:1px solid var(--line-2)
 .prose p{margin-top:12px;color:var(--ink-2);line-height:1.7}
 .prose ul{color:var(--ink-2);padding-left:22px;line-height:1.7}
 .prose li{margin:6px 0}
+
+.panel{position:relative;overflow:hidden;max-width:82ch;margin-top:36px;padding:28px 32px;background:#fff;border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-2)}
+.panel::before{content:"";position:absolute;left:0;top:0;bottom:0;width:6px;background:linear-gradient(180deg,var(--accent),#f0a06f)}
+.panel h3{font-size:21px}
+.panel p{margin-top:12px;color:var(--ink-2);line-height:1.7}
+@media (max-width:640px){.panel{padding:22px 20px 22px 24px}}

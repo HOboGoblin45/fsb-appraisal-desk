@@ -31,7 +31,7 @@ export async function resetDemo(env, base, h) {
     await h.setPassword(env, u.id, DEMO_PASSWORD);
   }
   await env.DB.prepare("UPDATE users SET license_no=?, license_state='IL', license_expires=?, eo_expires=?, eo_carrier=? WHERE id='u_demo_appraiser'").bind("556.001234", new Date(now + 200 * DAY).toISOString().slice(0, 10), new Date(now + 30 * DAY).toISOString().slice(0, 10), "Sample Insurance Co.").run();
-  await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(ago(30), "Vendor", "Provisioned the bank administrator account for Jordan Hale (admin@fsbdemo.apprifi.com) as designated by the bank.").run();
+  await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(ago(30), "Vendor", "Provisioned the administrator account for Jordan Hale (admin@fsbdemo.apprifi.com) as designated by the lender.").run();
   await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(ago(29), "Jordan Hale", "Added Maria Lopez, Lee Whitcomb and Sam Reynolds.").run();
 
   // 3. availability and contact

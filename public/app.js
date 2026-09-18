@@ -12,7 +12,7 @@ var CORE = (function(){
     "Delivered":"Report delivered to your lender","Invoiced":"Complete"
   };
   var ROLES = {
-    admin:{name:"Bank admin",hint:"Manages who can sign in and what they may do. Sees every order. Does not place orders."},
+    admin:{name:"Lender admin",hint:"Manages who can sign in and what they may do. Sees every order. Does not place orders."},
     desk:{name:"Appraisal desk",hint:"Loan officer assistant. Places, edits and cancels orders, uploads documents, sends questions."},
     officer:{name:"Loan officer",hint:"Read only. Sees status, downloads the finished report. Cannot touch the order, which keeps the independence record clean."},
     appraiser:{name:"Appraiser",hint:"Accepts, schedules, inspects, delivers the report and invoice, sets availability."}
@@ -84,7 +84,7 @@ var CORE = (function(){
   function lenderName(cfg){ return ((cfg&&cfg.lenderName)||"").trim()||"your lender"; }
   function isOpen(o){ return !o.cancelled && !o.declined && o.step<STEPS.length-1; }
 
-  /* ---------- time, always in the bank's zone ---------- */
+  /* ---------- time, always in the lender's zone ---------- */
   var TZ="America/Chicago";
   function parts(ms,tz){
     var f=new Intl.DateTimeFormat("en-US",{timeZone:tz||TZ,hourCycle:"h23",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",weekday:"short"});
@@ -399,7 +399,7 @@ var CORE = (function(){
       case "ask":
         if(!can(role,"ask")) fail("forbidden","Only the desk can send questions.");
         if(!p.text) fail("bad","Write a question first.");
-        log("Question from the bank: "+String(p.text).slice(0,2000)); send("ask",{text:String(p.text).slice(0,2000),by:who}); reply="Sent and logged."; break;
+        log("Question from the lender: "+String(p.text).slice(0,2000)); send("ask",{text:String(p.text).slice(0,2000),by:who}); reply="Sent and logged."; break;
       case "reply":
         if(role!=="appraiser") fail("forbidden","Only the appraiser can reply here.");
         if(!p.text) fail("bad","Write a reply first.");
@@ -693,7 +693,7 @@ var CORE = (function(){
     bar.innerHTML='DEMONSTRATION <em>Sample people and orders. Nothing is sent to anyone. The data resets every night.</em>';
     document.body.insertBefore(bar,document.body.firstChild);
   }
-  var DEMO_ROLES=[["desk","Appraisal desk","Place and manage orders","desk@fsbdemo.apprifi.com"],["appraiser","Appraiser","Accept, schedule, deliver","appraiser@fsbdemo.apprifi.com"],["officer","Loan officer","Watch status, download the report","officer@fsbdemo.apprifi.com"],["admin","Bank administrator","People and settings","admin@fsbdemo.apprifi.com"]];
+  var DEMO_ROLES=[["desk","Appraisal desk","Place and manage orders","desk@fsbdemo.apprifi.com"],["appraiser","Appraiser","Accept, schedule, deliver","appraiser@fsbdemo.apprifi.com"],["officer","Loan officer","Watch status, download the report","officer@fsbdemo.apprifi.com"],["admin","Lender administrator","People and settings","admin@fsbdemo.apprifi.com"]];
   function demoSigninHtml(){
     return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Try the portal</h2>'+
       '<p class="note">This is a demonstration copy with sample orders at every stage. Pick who you want to be. Everyone sees the same live data, so open two browser windows to watch a change made by one person appear for another.</p></div></div>'+
@@ -1030,7 +1030,7 @@ var CORE = (function(){
       '<div class="pb"><div class="stack">'+
       '<div><p class="lbl" style="margin-bottom:7px">How the appraiser appears to borrowers and agents</p><div class="grid3">'+
         '<label class="f">Name shown on messages<input id="c_aname" placeholder="Leave blank to show \'your appraiser\'" value="'+esc(c.appraiserName||"")+'"></label>'+
-        '<label class="f">Callback number<input id="c_aphone" inputmode="tel" placeholder="Leave blank to point them at the bank" value="'+esc(c.appraiserPhone||"")+'"></label>'+
+        '<label class="f">Callback number<input id="c_aphone" inputmode="tel" placeholder="Leave blank to point them at the lender" value="'+esc(c.appraiserPhone||"")+'"></label>'+
         '<label class="f">Appraiser email for notices<input id="c_aemail" type="email" placeholder="Used if no appraiser account exists" value="'+esc(c.appraiserEmail||"")+'"></label></div>'+
       '<p class="sm muted" style="margin-top:7px">'+esc(lender())+' is always the sender. This is the person a borrower reaches about access and timing.'+(S.me.role==="appraiser"?' These settings are yours; each appraiser has their own calendar.':' This is the default calendar; each appraiser can override it with their own.')+'</p></div>'+
       '<div><p class="lbl" style="margin-bottom:7px">Days worked</p><div class="row">'+dayNames.map(function(n,i){ var on=(c.days||[]).indexOf(i)>-1; return '<button class="btn btn-s'+(on?" btn-p":"")+'" data-day="'+i+'" aria-pressed="'+on+'">'+n+'</button>'; }).join("")+'</div></div>'+
@@ -1052,7 +1052,7 @@ var CORE = (function(){
     var fs=[["manual","Needs sending"],["queued","Sending"],["sent","Sent"],["failed","Failed"],["portal","Staff notices"],["all","All"]];
     var prov=S.demo?'<div class="callout"><b>Demonstration.</b> These are the real texts and emails the portal composes at each step, addressed to the sample people. In this copy nothing is delivered; in service they send automatically, and the appraiser and the desk are copied on the notices meant for them.</div>':'<div class="callout'+(S.providers.email?"":" warn")+'"><b>Email: '+(S.providers.email?("sending automatically"+(S.providers.emailVia==="cloudflare"?" through Cloudflare Email Service.":".")):"not connected yet.")+'</b> '+(S.providers.email?"Queued messages go out within a few seconds and retry for up to half an hour if the mail service is down.":"Until the mail service key is added, every email below has an \"Open in email app\" button that drafts it in Outlook or Gmail for you; press send there, then mark it sent here.")+
       ' <b>Texts: '+(S.providers.sms?"sending automatically.":"by hand.")+'</b> '+(S.providers.sms?"":"US carriers require A2P 10DLC registration before software can text; until that clears, \"Open in Messages\" drafts the text on a phone.")+
-      (S.providers.email?"":" Notices to bank staff and the appraiser are not queued while email is off, because everyone sees the same live board; they sit under Staff notices for the record.")+'</div>';
+      (S.providers.email?"":" Notices to lender staff and the appraiser are not queued while email is off, because everyone sees the same live board; they sit under Staff notices for the record.")+'</div>';
     return '<div class="panel"><div class="ph"><div><h2>Outbox</h2><p class="note">Every email and text the system composes, with its real wording and where it stands. Nothing here is hidden from you.</p></div></div>'+
       '<div class="pb">'+prov+'<div class="filters">'+fs.map(function(f){ return '<button data-mfilter="'+f[0]+'" aria-pressed="'+(S.mfilter===f[0])+'">'+f[1]+'</button>'; }).join("")+'</div>'+
       (S.messages.length?'<div class="stack-s">'+S.messages.map(function(m){ return msgHtml(m,true); }).join("")+'</div>':'<div class="empty"><b>Nothing here</b>'+(S.mfilter==="manual"?"Every message has been sent.":"")+'</div>')+
@@ -1240,7 +1240,7 @@ var CORE = (function(){
     if(a==="book"){
       var local=new Date(Date.now()+864e5); local.setMinutes(0,0,0);
       return modal(sheet("Book a time for "+CORE.contactName(o),
-        '<p class="sm muted">Use this after arranging a time by phone. The client gets a confirmation with a calendar file, the same as if they had picked it themselves. Times are in the bank\'s time zone.</p>'+
+        '<p class="sm muted">Use this after arranging a time by phone. The client gets a confirmation with a calendar file, the same as if they had picked it themselves. Times are in the lender\'s time zone.</p>'+
         '<label class="f">Inspection date and time<input id="b_when" type="datetime-local" step="900"></label>',
         "Book it","dobook",' data-from="'+from+'"'));
     }

@@ -41,7 +41,7 @@ function client() {
   r = await admin.post("/api/invite/accept", {code: adminCode, password: "correct horse battery"}); ok(r.status === 200 && r.data.user.role === "admin", "bank administrator accepts the invitation");
   r = await admin.get("/api/session"); ok(r.data.user && r.data.user.name === "Ryan Curtis" && r.data.config, "admin session persists with config");
   const re = spawnSync("node", ["provision.js", "reinvite", "--email", "ryan@example.com", "--local"], {encoding: "utf8"}); ok(/#invite=/.test(re.stdout), "vendor can reissue the administrator invitation"); await waitHealthy();
-  r = await admin.get("/api/audit"); ok(r.status === 200 && r.data.audit.some(x => /Provisioned the bank administrator/.test(x.what)), "provisioning is written to the administration record");
+  r = await admin.get("/api/audit"); ok(r.status === 200 && r.data.audit.some(x => /Provisioned the administrator/.test(x.what)), "provisioning is written to the administration record");
   r = await admin.call("POST", "/api/logout", {}, {headers: {"x-requested-with": "nope"}}); ok(r.status === 403, "mutation without the header is refused");
 
   console.log("people and invites");

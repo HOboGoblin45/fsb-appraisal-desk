@@ -77,7 +77,7 @@ if (cmd === "admin" || cmd === "reinvite") {
   }
   stmts.push("UPDATE invites SET used_at=" + q(now) + " WHERE user_id=" + q(id) + " AND used_at IS NULL;");
   stmts.push("INSERT INTO invites (code_hash,user_id,created_by,created_at,expires_at) VALUES (" + [q(hash), q(id), "'vendor provisioning'", q(now), q(expires)].join(",") + ");");
-  stmts.push("INSERT INTO audit (at,who,what) VALUES (" + [q(now), "'Vendor'", q((existing ? "Reissued the administrator invitation for " : "Provisioned the bank administrator account for ") + (name || existing.name) + " (" + email + ") as designated by the bank.")].join(",") + ");");
+  stmts.push("INSERT INTO audit (at,who,what) VALUES (" + [q(now), "'Vendor'", q((existing ? "Reissued the administrator invitation for " : "Provisioned the administrator account for ") + (name || existing.name) + " (" + email + ") as designated by the bank.")].join(",") + ");");
   d1(stmts.join("\n"));
   const link = publicUrl() + "/#invite=" + code;
   console.log("\nAdministrator: " + (name || existing.name) + " <" + email + ">" + (existing ? " (existing account)" : ""));

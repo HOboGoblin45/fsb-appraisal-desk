@@ -12,7 +12,7 @@ var CORE = (function(){
     "Delivered":"Report delivered to your lender","Invoiced":"Complete"
   };
   var ROLES = {
-    admin:{name:"Bank admin",hint:"Manages who can sign in and what they may do. Sees every order. Does not place orders."},
+    admin:{name:"Lender admin",hint:"Manages who can sign in and what they may do. Sees every order. Does not place orders."},
     desk:{name:"Appraisal desk",hint:"Loan officer assistant. Places, edits and cancels orders, uploads documents, sends questions."},
     officer:{name:"Loan officer",hint:"Read only. Sees status, downloads the finished report. Cannot touch the order, which keeps the independence record clean."},
     appraiser:{name:"Appraiser",hint:"Accepts, schedules, inspects, delivers the report and invoice, sets availability."}
@@ -84,7 +84,7 @@ var CORE = (function(){
   function lenderName(cfg){ return ((cfg&&cfg.lenderName)||"").trim()||"your lender"; }
   function isOpen(o){ return !o.cancelled && !o.declined && o.step<STEPS.length-1; }
 
-  /* ---------- time, always in the bank's zone ---------- */
+  /* ---------- time, always in the lender's zone ---------- */
   var TZ="America/Chicago";
   function parts(ms,tz){
     var f=new Intl.DateTimeFormat("en-US",{timeZone:tz||TZ,hourCycle:"h23",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",weekday:"short"});
@@ -399,7 +399,7 @@ var CORE = (function(){
       case "ask":
         if(!can(role,"ask")) fail("forbidden","Only the desk can send questions.");
         if(!p.text) fail("bad","Write a question first.");
-        log("Question from the bank: "+String(p.text).slice(0,2000)); send("ask",{text:String(p.text).slice(0,2000),by:who}); reply="Sent and logged."; break;
+        log("Question from the lender: "+String(p.text).slice(0,2000)); send("ask",{text:String(p.text).slice(0,2000),by:who}); reply="Sent and logged."; break;
       case "reply":
         if(role!=="appraiser") fail("forbidden","Only the appraiser can reply here.");
         if(!p.text) fail("bad","Write a reply first.");

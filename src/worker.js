@@ -433,7 +433,8 @@ function logText(o, cfg) {
   L.push("Recusal attestation: " + (o.attestation ? "RECORDED" : "NOT RECORDED"));
   L.push('Attested text: "I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction."');
   L.push("Control reference: 12 CFR 1026.42(d)(3)(ii); Interagency Appraisal and Evaluation Guidelines, 2010."); L.push("");
-  L.push("Identities in this record are authenticated portal accounts (email and password) with roles assigned by the bank administrator."); L.push("");
+  L.push("Engagement: direct between the lender (client) and the appraiser. No appraisal management company is involved. This portal is a communication and record-keeping tool operated for the lender; it does not select the appraiser, set or collect the fee, or review the report.");
+  L.push("Identities in this record are authenticated portal accounts (email and password) with roles assigned by the lender's administrator."); L.push("");
   L.push("DOCUMENTS");
   (o.docs || []).forEach(d => L.push("  " + d.uploaded_at + "  " + d.name + "  (" + d.size + " bytes, " + d.kind + ")  uploaded by " + d.uploaded_by + " (" + d.uploaded_role + ")"));
   if (!(o.docs || []).length) L.push("  none"); L.push("");
@@ -551,7 +552,7 @@ async function api(req, env, ctx) {
     const u = await env.DB.prepare("SELECT * FROM users WHERE email=?").bind(email).first();
     const generic = new ApiError(401, "auth", "That email and password do not match.");
     if (!u || !u.pw_hash) throw generic;
-    if (!u.active) throw new ApiError(403, "suspended", "This account has been suspended by the bank administrator.");
+    if (!u.active) throw new ApiError(403, "suspended", "This account has been suspended by the lender's administrator.");
     const h = await pbkdf2(password, u.pw_salt, u.pw_iter, env.AUTH_SECRET);
     if (!safeEqual(h, u.pw_hash)) throw generic;
     const cookie = await startSession(env, req, u.id);
@@ -568,14 +569,14 @@ async function api(req, env, ctx) {
     if (await limited(env, "invite:" + ip(req), 30, 15 * 60e3)) throw new ApiError(429, "rate", "Too many attempts. Wait 15 minutes.");
     if (method === "GET" && p(2)) {
       const inv = await env.DB.prepare("SELECT i.expires_at,i.used_at,u.name,u.email,u.role,u.active FROM invites i JOIN users u ON u.id=i.user_id WHERE i.code_hash=?").bind(await sha256(s(p(2), 60))).first();
-      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This invitation is not valid any more. Ask the bank administrator for a new one.");
+      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This invitation is not valid any more. Ask the lender's administrator for a new one.");
       return json({name: inv.name, email: inv.email, role: inv.role});
     }
     if (method === "POST" && p(2) === "accept") {
       const b = await readJSON(req);
       const h = await sha256(s(b.code, 60));
       const inv = await env.DB.prepare("SELECT i.user_id,i.expires_at,i.used_at,u.active,u.name FROM invites i JOIN users u ON u.id=i.user_id WHERE i.code_hash=?").bind(h).first();
-      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This invitation is not valid any more. Ask the bank administrator for a new one.");
+      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This invitation is not valid any more. Ask the lender's administrator for a new one.");
       await setPassword(env, inv.user_id, b.password);
       await env.DB.batch([
         env.DB.prepare("UPDATE invites SET used_at=? WHERE code_hash=?").bind(nowISO(), h),
@@ -640,7 +641,7 @@ async function api(req, env, ctx) {
 
   /* --- people (admin) --- */
   if (p(1) === "users") {
-    if (role !== "admin") throw denied("Only the bank administrator manages people.");
+    if (role !== "admin") throw denied("Only the lender's administrator manages people.");
     if (method === "GET" && !p(2)) {
       const rows = (await env.DB.prepare("SELECT u.id,u.email,u.name,u.role,u.phone,u.active,u.created_at,u.created_by,u.last_seen,u.license_no,u.license_state,u.license_expires,u.eo_expires,u.eo_carrier,(u.pw_hash IS NOT NULL) has_pw,(SELECT MAX(expires_at) FROM invites i WHERE i.user_id=u.id AND i.used_at IS NULL) invite_expires FROM users u ORDER BY u.name").all()).results || [];
       return json({users: rows.map(r => ({...r, active: !!r.active, has_pw: !!r.has_pw}))});

@@ -10,7 +10,7 @@ You will receive a one-time invitation link from the vendor. Open it, choose a p
 
 Open the People tab and choose Add someone. Enter their name, work email and role:
 
-Appraisal desk is the loan officer assistant who places orders, uploads the sales contract and other documents, edits or cancels orders, and sends factual questions to the appraiser. Loan officer sees status and downloads the finished report and invoice, and nothing else; this keeps the independence record clean. Appraiser accepts or declines orders, sends scheduling requests, logs the inspection, delivers the report and invoice, and sets their own availability. Bank admin can do what you can do.
+Appraisal desk is the loan officer assistant who places orders, uploads the sales contract and other documents, edits or cancels orders, and sends factual questions to the appraiser. Loan officer sees status and downloads the finished report and invoice, and nothing else; this keeps the independence record clean. Appraiser accepts or declines orders, sends scheduling requests, logs the inspection, delivers the report and invoice, and sets their own availability. Lender admin can do what you can do.
 
 Each new person gets a one-time sign-in link that lasts seven days. Copy it and send it to them, or use Send by email to draft the message in your mail program. When someone forgets their password, the New sign-in link button on their row issues a fresh one and the old password stops working once they use it. Suspend ends a person's access immediately and signs them out everywhere; Restore brings them back. A role can be changed from the drop-down on their row and takes effect at their next sign-in. You cannot suspend yourself or remove the last administrator.
 

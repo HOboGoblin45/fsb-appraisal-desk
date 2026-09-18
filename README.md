@@ -2,6 +2,10 @@
 
 The appraisal order, status, scheduling and delivery portal for a lender and its appraisers. One web address per lender, four staff roles, and a personal status page for each borrower and agent. Runs on Cloudflare Workers with a D1 database and KV document storage. First Security Bank's copy is https://fsb.apprifi.com; the demonstration is https://fsbdemo.apprifi.com.
 
+## What this is, and is not
+
+This is the appraiser's direct-lender order desk, offered to each lender the appraiser works with. It gives a community or commercial lender and its own appraiser the tools an appraisal management company's portal provides (one place to order, attach documents, schedule, watch status, ask questions, receive the report and invoice, and keep the record) without putting a management company between them. The lender engages the appraiser directly, sets nothing through a panel, and pays the appraiser directly; the software does not select appraisers, set or collect fees, or review reports, and the independence record says so on every order. It is not an AMC and is not designed to become one: the multiple-appraiser features exist so a firm with a supervising or second appraiser can run its own work, not so a lender can manage a rotating panel.
+
 ## Version 2: any lender
 
 Every lender gets an isolated deployment (its own Worker, database, document store, hostname and secret) created by one command, and the lender's administrator controls the branding from inside the portal (name, tagline, colors, logo, time zone). Nothing in the code names a lender. What v2 added, each traced to the appraiser's own client correspondence:
@@ -18,7 +22,7 @@ The appraisal desk places an order on one page and attests to recusal from the c
 
 The portal was commissioned by First Security Bank, and the bank controls access. The bank names its portal administrator; the vendor (Apprifi) provisions that one account and hands the bank a single invitation link. From then on the administrator invites the bank's staff and the appraiser, assigns roles, suspends accounts and issues new sign-in links. The vendor holds no account inside the portal; it operates the infrastructure (Cloudflare account, deployments, backups) and can only re-issue the administrator's invitation at the bank's request.
 
-Roles: Bank admin manages people and settings and can see every order. Appraisal desk places, edits and cancels orders, uploads documents and sends factual questions. Loan officer is read only and can download the finished report and invoice. Appraiser accepts, schedules, inspects, delivers, invoices and sets availability. Roles are assigned when a person is invited; nobody chooses their own.
+Roles: Lender admin manages people and settings and can see every order. Appraisal desk places, edits and cancels orders, uploads documents and sends factual questions. Loan officer is read only and can download the finished report and invoice. Appraiser accepts, schedules, inspects, delivers, invoices and sets availability. Roles are assigned when a person is invited; nobody chooses their own.
 
 ## Going into service
 

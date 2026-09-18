@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Apprifi logo generator.
 
-Parametric, vector-first. Every mark is drawn from a few numbers on a 100x100 grid so it stays crisp at
-16 px and at 2 m. The wordmark is set in PT Serif Bold and converted to outlines, so the SVG needs no fonts.
+The shipping logo is "wordmark": the name set in Liberation Serif Regular, which carries Times New Roman's
+metrics and shapes, converted to outlines. One colour, no mark, no ornament, no webfont to load.
 
-    python3 tools/logogen.py sheet            -> tools/out/sheet.png     every concept, for choosing
-    python3 tools/logogen.py build <concept>  -> public/apprifi-*.svg, favicons, og image, site copies
+    python3 tools/logogen.py build wordmark   -> public/apprifi-*.svg, favicons, site copies  (current)
+    python3 tools/logogen.py sheet            -> tools/out/sheet.png   the older drawn concepts, for reference
+    python3 tools/logogen.py build <concept>  -> any of the drawn concepts below
 
-Concepts: aframe (the house stands in for the A of the wordmark), checkA, roofbar, houserail, tile, ligature, pin
-Palette: navy #12324f, orange #d4652a (override with --navy/--orange).
+The drawn concepts (aframe, checkA, roofbar, houserail, tile, ligature, pin) are kept for history. They are not
+shipped: the A-frame house that stood in for the A was retired on 18 September 2026 in favour of plain type.
+Palette: navy #12324f, orange #d4652a (override with --navy/--orange). The wordmark uses navy only.
 """
-import sys, os, math, argparse, io
+import sys, os, math, argparse, io, re
 from fontTools.ttLib import TTFont
 from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
@@ -84,6 +86,58 @@ def aframe(navy, orange):
     return window + rafters + beam + door
 
 CONCEPTS = {"aframe": aframe, "checkA": checkA, "roofbar": roofbar, "houserail": houserail, "tile": tile, "ligature": ligature, "pin": pin}
+
+# ---------- the wordmark: no drawing at all, just the name set in a Times-metric serif ----------
+SERIF = os.environ.get("APPRIFI_SERIF", os.path.join(os.path.dirname(os.path.abspath(__file__)), "LiberationSerif-Regular.ttf"))
+
+def _set_text(text, font_path, size, tracking):
+    """Outline `text` at `size` px with the baseline at y=0. Returns (path_d, advance, ink_bbox)."""
+    from fontTools.pens.boundsPen import BoundsPen
+    font = TTFont(font_path)
+    cmap = font.getBestCmap(); gs = font.getGlyphSet(); upem = font["head"].unitsPerEm
+    scale = size / upem
+    x = 0.0; parts = []; bp = BoundsPen(gs)
+    for ch in text:
+        gname = cmap[ord(ch)]
+        t = (scale, 0, 0, -scale, x, 0)  # flip y: font space is y-up, SVG is y-down
+        pen = SVGPathPen(gs)
+        gs[gname].draw(TransformPen(pen, t))
+        parts.append(pen.getCommands())
+        gs[gname].draw(TransformPen(bp, t))
+        x += gs[gname].width * scale + tracking
+    d = " ".join(parts)
+    # two decimals is well under a printer's dot at any size we ship, and keeps the file small
+    d = re.sub(r"-?\d+\.\d+", lambda m: ("%g" % round(float(m.group()), 2)), d)
+    return d, x - tracking, bp.bounds
+
+def wordmark_only_svg(text="Apprifi", color="#12324f", h=40, ink=0.70, track=0.035):
+    """The name, set in Liberation Serif Regular (Times New Roman metrics) and converted to outlines.
+
+    One colour, no rule, no mark, no ornament. `ink` is the share of the height the letters occupy, from the
+    top of the A to the foot of the p, which leaves the rest as breathing room so the logo can sit flush in a
+    header without looking crowded. Outlines mean no webfont, no FOUT and no licence to carry."""
+    probe = 100.0
+    _, _, b = _set_text(text, SERIF, probe, track * probe)
+    size = probe * (ink * h) / (b[3] - b[1])
+    d, _, (x0, y0, x1, y1) = _set_text(text, SERIF, size, track * size)
+    pad = h * 0.05
+    w = (x1 - x0) + 2 * pad
+    baseline = (h - (y1 - y0)) / 2 - y0
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h}" viewBox="0 0 {w:.1f} {h}" role="img" aria-label="{text}">'
+            f'<title>{text}</title>'
+            f'<path transform="translate({pad - x0:.2f} {baseline:.2f})" d="{d}" fill="{color}"/></svg>')
+
+def letter_mark_svg(letter="A", color="#12324f", size=40, bg=None, ink=0.62):
+    """The same letter from the same face, centred on the 100 grid. Used for the favicon and the app icon."""
+    probe = 100.0
+    _, _, b = _set_text(letter, SERIF, probe, 0)
+    s = probe * (ink * 100) / (b[3] - b[1])
+    d, _, (x0, y0, x1, y1) = _set_text(letter, SERIF, s, 0)
+    dx = (100 - (x1 - x0)) / 2 - x0
+    dy = (100 - (y1 - y0)) / 2 - y0
+    bgrect = f'<rect width="100" height="100" rx="22" fill="{bg}"/>' if bg else ""
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 100 100" role="img" aria-label="Apprifi">'
+            f'{bgrect}<path transform="translate({dx:.2f} {dy:.2f})" d="{d}" fill="{color}"/></svg>')
 
 def mark_svg(concept, navy, orange, size=100, bg=None, pad=0):
     inner = CONCEPTS[concept](navy, orange)
@@ -166,24 +220,36 @@ def sheet(navy, orange):
 def build(concept, navy, orange):
     pub = os.path.join(ROOT, "public"); site = os.path.join(ROOT, "site", "public")
     house = concept == "aframe"
-    files = {
-        "apprifi-logo.svg": lockup_house_svg(navy, orange) if house else lockup_svg(concept, navy, orange, mark=40),
-        "apprifi-logo-white.svg": lockup_house_svg("#ffffff", orange, text_color="#ffffff") if house else lockup_svg(concept, "#ffffff", orange, text_color="#ffffff", mark=40),
-        "apprifi-mark.svg": mark_svg(concept, navy, orange, size=40),
-        "apprifi-mark-tile.svg": mark_svg(concept, "#ffffff", orange, size=40, bg=navy),
-    }
+    if concept == "wordmark":
+        files = {
+            "apprifi-logo.svg": wordmark_only_svg(color=navy),
+            "apprifi-logo-white.svg": wordmark_only_svg(color="#ffffff"),
+            "apprifi-mark.svg": letter_mark_svg("A", navy),
+            "apprifi-mark-tile.svg": letter_mark_svg("A", "#ffffff", bg=navy),
+        }
+        icon = letter_mark_svg("A", "#ffffff", bg=navy)
+    else:
+        files = {
+            "apprifi-logo.svg": lockup_house_svg(navy, orange) if house else lockup_svg(concept, navy, orange, mark=40),
+            "apprifi-logo-white.svg": lockup_house_svg("#ffffff", orange, text_color="#ffffff") if house else lockup_svg(concept, "#ffffff", orange, text_color="#ffffff", mark=40),
+            "apprifi-mark.svg": mark_svg(concept, navy, orange, size=40),
+            "apprifi-mark-tile.svg": mark_svg(concept, "#ffffff", orange, size=40, bg=navy),
+        }
+        icon = mark_svg(concept, "#ffffff", orange, bg=navy)
     for d in (pub, site):
         for name, svg in files.items():
             with open(os.path.join(d, name), "w") as f: f.write(svg)
-        png(mark_svg(concept, "#ffffff", orange, bg=navy), os.path.join(d, "favicon.png"), 64)
-        png(mark_svg(concept, "#ffffff", orange, bg=navy), os.path.join(d, "apple-touch-icon.png"), 180)
-    print("built", concept, "into public/ and site/public/")
+        png(icon, os.path.join(d, "favicon.png"), 64)
+        png(icon, os.path.join(d, "apple-touch-icon.png"), 180)
+    import re
+    w = re.search(r'width="(\d+)"', files["apprifi-logo.svg"]).group(1)
+    print("built", concept, "into public/ and site/public/; logo is", w + "x40")
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("cmd", choices=["sheet", "build"]); ap.add_argument("concept", nargs="?")
+    ap = argparse.ArgumentParser(); ap.add_argument("cmd", choices=["sheet", "build"]); ap.add_argument("concept", nargs="?", default="wordmark")
     ap.add_argument("--navy", default="#12324f"); ap.add_argument("--orange", default="#d4652a")
     a = ap.parse_args()
     if a.cmd == "sheet": sheet(a.navy, a.orange)
     else:
-        if a.concept not in CONCEPTS: sys.exit("concept must be one of " + ", ".join(CONCEPTS))
+        if a.concept != "wordmark" and a.concept not in CONCEPTS: sys.exit("concept must be wordmark or one of " + ", ".join(CONCEPTS))
         build(a.concept, a.navy, a.orange)

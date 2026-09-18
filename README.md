@@ -58,6 +58,10 @@ https://fsbdemo.apprifi.com is the same code deployed as a second Worker (`--env
 
 Cloudflare's free Workers plan allows 100,000 requests a day and 10 milliseconds of CPU per request. Sign-in uses PBKDF2 with 100,000 iterations, which is the most the platform allows; if sign-in ever fails with a CPU limit error, move the account to the Workers Paid plan ($5 a month), which also raises every other limit. D1 holds 5 GB. Sessions last 14 days of inactivity. Invitations last 7 days. Sign-in is rate limited to 10 attempts per email and 30 per address every 15 minutes.
 
+## Platform features used (2026)
+
+The app uses the parts of the 2026 web platform that are safe in every current browser, each with a fallback: native `<dialog closedby="any">` for every sheet (focus trapped, Escape and outside clicks close it, page inert underneath); `contrast-color()` so text on a lender's chosen primary and accent colors is always legible, with a luminance fallback computed in JavaScript for browsers without it; CSS anchor positioning for the account menu; `field-sizing: content` so text boxes grow with what is typed; `text-wrap: balance` and `pretty` for headings and prose; same-document view transitions for section changes, disabled under reduced-motion. Glassmorphism, customizable selects and CSS carousels were deliberately not adopted.
+
 ## Adding a lender
 
 From the repository on the deploying PC, after `npx wrangler login`:

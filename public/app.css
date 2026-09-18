@@ -1,6 +1,8 @@
   :root{
     color-scheme:light;
     --navy:#1f4984;
+    --on-navy:#ffffff;
+    --on-red:#ffffff;
     --navy-deep:#16355f;
     --navy-soft:#eaf0f8;
     --blue:#03138c;
@@ -58,11 +60,11 @@
   .bandin::-webkit-scrollbar{display:none}
   .bandin button{
     padding:13px 16px 11px;font-size:12.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
-    color:rgba(255,255,255,.82);white-space:nowrap;border-bottom:3px solid transparent;margin-bottom:-3px;
+    color:var(--on-navy);opacity:.82;white-space:nowrap;border-bottom:3px solid transparent;margin-bottom:-3px;
   }
-  .bandin button:hover:not(:disabled){color:#fff}
+  .bandin button:hover:not(:disabled){opacity:1}
   .bandin button:disabled{cursor:default;opacity:.9}
-  .bandin button[aria-selected="true"]{color:#fff;border-bottom-color:#fff}
+  .bandin button[aria-selected="true"]{opacity:1;border-bottom-color:var(--on-navy)}
 
   .wrap{max-width:1180px;margin:0 auto;padding-inline:16px;padding-block:0 70px}
   .mast{padding-block:20px 4px}
@@ -85,7 +87,7 @@
 
   .btn{border-radius:7px;padding:8px 14px;font-size:13px;font-weight:600;border:1px solid var(--line);background:var(--surface-2);color:var(--ink);transition:background .12s,border-color .12s}
   .btn:hover:not(:disabled){background:var(--line-2)}
-  .btn-p{background:var(--navy);border-color:var(--navy);color:#fff}
+  .btn-p{background:var(--navy);border-color:var(--navy);color:var(--on-navy)}
   .btn-p:hover:not(:disabled){background:var(--navy-deep);border-color:var(--navy-deep)}
   .btn:disabled{opacity:.42;cursor:not-allowed}
   .btn-s{padding:6px 10px;font-size:12px;font-weight:600}
@@ -219,7 +221,7 @@
 
   .fbtn{
     position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:50;
-    background:var(--red);color:#fff;border-radius:999px;padding:11px 18px;font-size:13px;font-weight:700;
+    background:var(--red);color:var(--on-red);border-radius:999px;padding:11px 18px;font-size:13px;font-weight:700;
     box-shadow:0 8px 22px -8px rgba(0,0,0,.5);
   }
   .fbtn:hover{filter:brightness(1.12)}
@@ -276,7 +278,7 @@
   [hidden]{display:none!important}
   .filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
   .filters button{padding:6px 11px;border:1px solid var(--line);background:#fff;border-radius:4px;font-size:12.5px;font-weight:600;color:var(--ink-2);cursor:pointer;min-height:34px}
-  .filters button[aria-pressed="true"]{background:var(--navy);color:#fff;border-color:var(--navy)}
+  .filters button[aria-pressed="true"]{background:var(--navy);color:var(--on-navy);border-color:var(--navy)}
   .filters .search{margin-left:auto;min-width:200px;flex:1;max-width:320px}
   .filters .search input{width:100%;min-height:34px;padding:6px 10px;border:1px solid var(--line);border-radius:4px;font-size:13px}
   .pill.sent{background:#e8f4ea;color:#1d5f2b;border-color:#bcd9c2}
@@ -307,3 +309,21 @@
   .signwrap{max-width:460px;margin:0 auto}
   .brandline{font-size:12px;color:var(--ink-3);text-align:center;margin-top:14px}
   @media (max-width:640px){ .filters .search{max-width:none;min-width:0;width:100%;margin-left:0} .filters .search input{font-size:16px;min-height:40px} .menu{right:8px} }
+
+  /* 2026 platform features, each with a safe fallback */
+  h1,h2,h3,h4{text-wrap:balance}
+  p,li,dd,.note{text-wrap:pretty}
+  textarea{field-sizing:content;min-height:84px;max-height:60vh}
+  @supports (color: contrast-color(red)){
+    :root{--on-navy:contrast-color(var(--navy));--on-red:contrast-color(var(--red))}
+  }
+  dialog.dlg{border:0;padding:0;background:transparent;max-width:none;width:100vw;height:100vh;max-height:none;margin:0;inset:0;overflow:visible}
+  dialog.dlg::backdrop{background:transparent}
+  dialog.dlg .sheet{position:fixed;inset:0}
+  @supports (anchor-name: --a){
+    .chip.act{anchor-name:--who}
+    .menu{position:absolute;position-anchor:--who;top:anchor(bottom);right:anchor(right);left:auto;margin-top:6px;position-try-fallbacks:flip-block}
+  }
+  @view-transition{navigation:auto}
+  ::view-transition-old(root),::view-transition-new(root){animation-duration:160ms}
+  @media (prefers-reduced-motion:reduce){ ::view-transition-old(root),::view-transition-new(root){animation:none} }

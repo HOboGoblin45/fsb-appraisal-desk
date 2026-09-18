@@ -28,7 +28,25 @@
     document.body.appendChild(el);
     S.toastT=setTimeout(function(){el.remove();},5200);
   }
-  function modal(html){ $("modal").innerHTML=html||""; if(html){ var f=$("modal").querySelector("input,select,textarea"); if(f) try{ f.focus(); }catch(e){} } }
+  /* Sheets ride on a native <dialog> (closedby="any": Escape and clicks outside close it, focus is trapped, the page is inert). */
+  function modal(html){
+    var host=$("modal"), old=host.querySelector("dialog");
+    if(old){ try{ old.close(); }catch(e){} }
+    host.innerHTML="";
+    if(!html) return;
+    var d=document.createElement("dialog"); d.className="dlg"; d.setAttribute("closedby","any"); d.setAttribute("aria-label","Dialog"); d.innerHTML=html;
+    host.appendChild(d);
+    d.addEventListener("close",function(){ if(d.parentNode) d.parentNode.removeChild(d); });
+    d.addEventListener("cancel",function(e){ e.preventDefault(); d.close(); });
+    try{ d.showModal(); }catch(e){ d.setAttribute("open",""); }
+    var f=d.querySelector("input,select,textarea"); if(f) try{ f.focus(); }catch(e){}
+  }
+  function modalOpen(){ return !!$("modal").querySelector("dialog"); }
+  /* View transitions for user-initiated screen changes; polling re-renders stay instant. */
+  function renderVT(){
+    if(document.startViewTransition && !window.matchMedia("(prefers-reduced-motion: reduce)").matches){ document.startViewTransition(function(){ render(); }); }
+    else render();
+  }
   function money(n){ return CORE.money(n); }
   function status(o){ return CORE.statusOf(o); }
   function can(w){ return S.me&&CORE.can(S.me.role,w); }
@@ -71,7 +89,9 @@
   function applyBrand(b){
     if(!b) return; S.brand=b;
     var st=$("brandvars"); if(!st){ st=document.createElement("style"); st.id="brandvars"; document.head.appendChild(st); }
-    st.textContent=":root{--navy:"+b.primary+";--navy-deep:"+shade(b.primary,0.78)+";--red:"+b.accent+"}";
+    var on=function(hex){ var m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||""); if(!m) return "#ffffff"; var L=[1,2,3].map(function(i){ var v=parseInt(m[i],16)/255; return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4); }); var lum=0.2126*L[0]+0.7152*L[1]+0.0722*L[2]; return lum>0.35?"#111820":"#ffffff"; };
+    var native=!!(window.CSS&&CSS.supports&&CSS.supports("color","contrast-color(red)"));
+    st.textContent=":root{--navy:"+b.primary+";--navy-deep:"+shade(b.primary,0.78)+";--red:"+b.accent+(native?"":";--on-navy:"+on(b.primary)+";--on-red:"+on(b.accent))+"}";
     document.title=b.name+" "+(b.productName||"Appraisal Desk");
     var logo=document.querySelector(".logo"), wrap=document.querySelector(".topin");
     if(b.logo){ if(!logo){ logo=document.createElement("img"); logo.className="logo"; wrap.insertBefore(logo,wrap.firstChild); var t=document.querySelector(".textlogo"); if(t) t.remove(); } logo.src=b.logo; logo.alt=b.name; }
@@ -818,7 +838,7 @@
   document.addEventListener("input",function(e){ if(e.target&&e.target.id==="q"){ S.q=e.target.value; render(); } });
   function prodHint(){ var h=$("prodhint"), t=val("n_type"); if(!h) return; var pr=CORE.PRODUCTS.filter(function(x){ return x.name===t; })[0]; h.innerHTML=pr?('<b>'+esc(pr.name)+'.</b> '+(pr.xml?'Usually delivered with an XML (UAD) file. ':'')+(pr.needs?('The appraiser will need: '+esc(pr.needs)):'')):''; }
   document.addEventListener("change",function(e){ if(e.target&&e.target.id==="n_type") prodHint(); });
-  document.addEventListener("keydown",function(e){ if(e.key==="Escape"){ if($("modal").innerHTML){ modal(""); } if(S.menu){ S.menu=false; render(); } } });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&S.menu&&!modalOpen()){ S.menu=false; render(); } });
 
   document.addEventListener("click",function(e){
     var t=e.target.closest("[data-stop],[data-a],[data-v],[data-open],[data-tab],[data-adv],[data-slot],[data-day],[data-dayoff],[data-copy],[data-copyoff],[data-filter],[data-mfilter],[data-msent],[data-mretry],[data-uinvite],[data-uactive],[data-dvis],[data-ddel],[data-demo]");
@@ -826,7 +846,7 @@
     if(!t) return;
     if(t.dataset.stop&&!t.dataset.a) return;
     var a=t.dataset.a, o=current();
-    if(t.dataset.v){ S.view=t.dataset.v; S.menu=false; render(); refreshView(); return; }
+    if(t.dataset.v){ S.view=t.dataset.v; S.menu=false; renderVT(); refreshView(); return; }
     if(t.dataset.open){ S.sel=t.dataset.open; S.tab="status"; if(S.me.role==="appraiser") S.view="queue"; render(); if(!S.detail[S.sel]) loadDetail(S.sel).catch(fail); else { var el=document.querySelector(".detail"); if(el&&window.innerWidth<900) el.scrollIntoView({behavior:"smooth"}); } return; }
     if(t.dataset.tab){ S.tab=t.dataset.tab; render(); return; }
     if(t.dataset.filter){ S.filter=t.dataset.filter; render(); return; }
@@ -864,8 +884,8 @@
     if(a==="savebank"){ var cc=S.config||CORE.defaultConfig(); api("PUT","/api/config",cc).then(function(d){ S.config=d.config; render(); toast("Bank settings saved."); }).catch(fail); return; }
     if(a==="saveperson"){ var pn=val("p_name"), pe=val("p_email"), pr=val("p_role"), pp=val("p_phone"); if(!pn||!pe){ toast("Name and email are required."); return; }
       api("POST","/api/users",{name:pn,email:pe,role:pr,phone:pp}).then(function(d){ modal(inviteLinkSheet(pn,pe,d.inviteLink,d.expiresDays)); return loadUsers(); }).then(render).catch(fail); return; }
-    if(a==="gonew"){ S.view="new"; render(); return; }
-    if(a==="goboard"){ S.view="board"; render(); return; }
+    if(a==="gonew"){ S.view="new"; renderVT(); return; }
+    if(a==="goboard"){ S.view="board"; renderVT(); return; }
     if(a==="createorder"){ createOrder(); return; }
     if(a==="saveavail"){ saveAvail(); return; }
     if(a==="adddayoff"){ var dv=val("c_off"); if(!/^\d{4}-\d{2}-\d{2}$/.test(dv)){ toast("Pick a date first."); return; } S.config.daysOff=S.config.daysOff||[]; if(S.config.daysOff.indexOf(dv)===-1) S.config.daysOff.push(dv); S.config.daysOff.sort(); render(); return; }

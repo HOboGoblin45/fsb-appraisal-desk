@@ -18,10 +18,10 @@ function client() {
   const anon = client();
   let r = await anon.get("/api/session"); ok(r.data.demo === true, "session reports demo mode");
   r = await anon.post("/api/demo/reset", {});
-  if (r.status === 401) { const d = client(); await d.post("/api/login", {email: "desk@fsbdemo.apprifi.com", password: "FSBdemo-2026"}); r = await d.post("/api/demo/reset", {}); ok(r.status === 200, "a signed-in person can reset the demonstration"); }
+  if (r.status === 401) { const d = client(); await d.post("/api/login", {email: "desk@demo.apprifi.com", password: "FSBdemo-2026"}); r = await d.post("/api/demo/reset", {}); ok(r.status === 200, "a signed-in person can reset the demonstration"); }
   else ok(r.status === 200, "an empty demonstration loads itself (" + r.status + ")");
   const who = {};
-  for (const [role, email] of [["desk", "desk@fsbdemo.apprifi.com"], ["appraiser", "appraiser@fsbdemo.apprifi.com"], ["officer", "officer@fsbdemo.apprifi.com"], ["admin", "admin@fsbdemo.apprifi.com"]]) {
+  for (const [role, email] of [["desk", "desk@demo.apprifi.com"], ["appraiser", "appraiser@demo.apprifi.com"], ["officer", "officer@demo.apprifi.com"], ["admin", "admin@demo.apprifi.com"]]) {
     who[role] = client(); r = await who[role].post("/api/login", {email, password: "FSBdemo-2026"}); ok(r.status === 200 && r.data.user.role === role, "demo sign-in as " + role + " (" + r.data.user.name + ")");
   }
   r = await who.desk.get("/api/orders"); const orders = r.data.orders; ok(orders.length === 8, "eight sample orders");

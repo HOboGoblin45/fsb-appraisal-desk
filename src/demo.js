@@ -5,10 +5,10 @@ import {SAMPLE_PDFS} from "./demo-files.js";
 
 export const DEMO_PASSWORD = "FSBdemo-2026";
 export const DEMO_USERS = [
-  {id: "u_demo_admin", email: "admin@fsbdemo.apprifi.com", name: "Jordan Hale", role: "admin", phone: "(309) 555-0101"},
-  {id: "u_demo_desk", email: "desk@fsbdemo.apprifi.com", name: "Maria Lopez", role: "desk", phone: "(309) 555-0102"},
-  {id: "u_demo_officer", email: "officer@fsbdemo.apprifi.com", name: "Lee Whitcomb", role: "officer", phone: "(309) 555-0103"},
-  {id: "u_demo_appraiser", email: "appraiser@fsbdemo.apprifi.com", name: "Sam Reynolds", role: "appraiser", phone: "(309) 555-0100"}
+  {id: "u_demo_admin", email: "admin@demo.apprifi.com", name: "Jordan Hale", role: "admin", phone: "(309) 555-0101"},
+  {id: "u_demo_desk", email: "desk@demo.apprifi.com", name: "Maria Lopez", role: "desk", phone: "(309) 555-0102"},
+  {id: "u_demo_officer", email: "officer@demo.apprifi.com", name: "Lee Whitcomb", role: "officer", phone: "(309) 555-0103"},
+  {id: "u_demo_appraiser", email: "appraiser@demo.apprifi.com", name: "Sam Reynolds", role: "appraiser", phone: "(309) 555-0100"}
 ];
 
 function b64(s) { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; }
@@ -31,14 +31,14 @@ export async function resetDemo(env, base, h) {
     await h.setPassword(env, u.id, DEMO_PASSWORD);
   }
   await env.DB.prepare("UPDATE users SET license_no=?, license_state='IL', license_expires=?, eo_expires=?, eo_carrier=? WHERE id='u_demo_appraiser'").bind("556.001234", new Date(now + 200 * DAY).toISOString().slice(0, 10), new Date(now + 30 * DAY).toISOString().slice(0, 10), "Sample Insurance Co.").run();
-  await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(ago(30), "Vendor", "Provisioned the administrator account for Jordan Hale (admin@fsbdemo.apprifi.com) as designated by the lender.").run();
+  await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(ago(30), "Vendor", "Provisioned the administrator account for Jordan Hale (admin@demo.apprifi.com) as designated by the lender.").run();
   await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(ago(29), "Jordan Hale", "Added Maria Lopez, Lee Whitcomb and Sam Reynolds.").run();
 
   // 3. availability and contact
-  const cfg = {...CORE.defaultConfig(), appraiserName: "Sam Reynolds", appraiserPhone: "(309) 555-0100", appraiserEmail: "appraiser@fsbdemo.apprifi.com", leadHours: 24, deskCopyEmails: []};
+  const cfg = {...CORE.defaultConfig(), appraiserName: "Sam Reynolds", appraiserPhone: "(309) 555-0100", appraiserEmail: "appraiser@demo.apprifi.com", leadHours: 24, deskCopyEmails: []};
   await env.DB.prepare("INSERT INTO config (key,value,updated_at,updated_by) VALUES ('availability',?,?,?)").bind(JSON.stringify(cfg), ago(28), "Sam Reynolds").run();
 
-  const desk = {id: "u_demo_desk", name: "Maria Lopez", email: "desk@fsbdemo.apprifi.com", role: "desk"};
+  const desk = {id: "u_demo_desk", name: "Maria Lopez", email: "desk@demo.apprifi.com", role: "desk"};
   const apr = {id: "u_demo_appraiser", name: "Sam Reynolds", role: "appraiser"};
   const deskActor = {id: desk.id, name: desk.name, role: "desk"};
   const act = (id, action, params, actor, at, opts) => h.runAction(env, base, null, id, action, params || {}, actor, {...(opts || {}), now: at});
@@ -55,7 +55,7 @@ export async function resetDemo(env, base, h) {
 
   // 4. orders, oldest first so the board reads naturally
   // F: complete (invoiced)
-  const F = await place({addr: "16 W Elm St", city: "Danvers, IL 61732", loan: "2026-004102", purpose: "Refinance", loanType: "Portfolio / in-house", propertyType: "Single family", occupancy: "Owner occupied", pins: "14-02-118-006", refNo: "FSB-2026-0041", due: new Date(now - 6 * DAY).toISOString().slice(0, 10), borrowerName: "Thomas Reid", borrowerPhone: "(309) 555-0171", borrowerEmail: "thomas.reid@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@fsbdemo.apprifi.com", notes: "Owner occupied. Call ahead."}, ago(20));
+  const F = await place({addr: "16 W Elm St", city: "Danvers, IL 61732", loan: "2026-004102", purpose: "Refinance", loanType: "Portfolio / in-house", propertyType: "Single family", occupancy: "Owner occupied", pins: "14-02-118-006", refNo: "LN-2026-0041", due: new Date(now - 6 * DAY).toISOString().slice(0, 10), borrowerName: "Thomas Reid", borrowerPhone: "(309) 555-0171", borrowerEmail: "thomas.reid@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@demo.apprifi.com", notes: "Owner occupied. Call ahead."}, ago(20));
   await addDoc(F, "engagement-letter-16-elm.pdf", "engagement", "contract", desk.name, "desk", false, ago(20));
   await act(F.id, "accept", {fee: 525, etaDate: new Date(now - 8 * DAY).toISOString().slice(0, 10)}, apr, ago(19, 20));
   await act(F.id, "schedule", {}, apr, ago(19, 18));
@@ -71,7 +71,7 @@ export async function resetDemo(env, base, h) {
   await act(F.id, "paid", {method: "Check", ref: "10422", amount: 525}, deskActor, ago(1, 6));
 
   // E: delivered, invoice pending
-  const E = await place({addr: "2201 Ironwood Ct", city: "Normal, IL 61761", loan: "2026-004217", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Vacant", pins: "14-33-427-003", refNo: "FSB-2026-0047", closingDate: new Date(now + 4 * DAY).toISOString().slice(0, 10), due: new Date(now - 2 * DAY).toISOString().slice(0, 10), borrowerName: "Priya Natarajan", borrowerPhone: "(309) 555-0148", borrowerEmail: "priya.n@example.com", agentName: "Marcy Teague, Kestrel Realty", agentPhone: "(309) 555-0199", agentEmail: "marcy@example.com", accessVia: "Agent", officerName: "Lee Whitcomb", officerEmail: "officer@fsbdemo.apprifi.com", notes: "Vacant. Lockbox on the front door; agent will share the code."}, ago(14));
+  const E = await place({addr: "2201 Ironwood Ct", city: "Normal, IL 61761", loan: "2026-004217", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Vacant", pins: "14-33-427-003", refNo: "LN-2026-0047", closingDate: new Date(now + 4 * DAY).toISOString().slice(0, 10), due: new Date(now - 2 * DAY).toISOString().slice(0, 10), borrowerName: "Priya Natarajan", borrowerPhone: "(309) 555-0148", borrowerEmail: "priya.n@example.com", agentName: "Marcy Teague, Kestrel Realty", agentPhone: "(309) 555-0199", agentEmail: "marcy@example.com", accessVia: "Agent", officerName: "Lee Whitcomb", officerEmail: "officer@demo.apprifi.com", notes: "Vacant. Lockbox on the front door; agent will share the code."}, ago(14));
   await addDoc(E, "sales-contract-2201-ironwood.pdf", "contract", "contract", desk.name, "desk", false, ago(14));
   await act(E.id, "accept", {fee: 575, etaDate: new Date(now - 4 * DAY).toISOString().slice(0, 10), note: "Lockbox access confirmed with the agent."}, apr, ago(13, 22));
   await act(E.id, "schedule", {}, apr, ago(13, 20));
@@ -86,7 +86,7 @@ export async function resetDemo(env, base, h) {
   await act(E.id, "deliver", {}, apr, ago(1, 21));
 
   // D: in review
-  const D = await place({addr: "305 S Main St", city: "Deer Creek, IL 61733", loan: "2026-004288", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Seller occupied", premise: "As improved (subject to listed repairs)", pins: "05-27-306-011", refNo: "FSB-2026-0052", closingDate: new Date(now + 6 * DAY).toISOString().slice(0, 10), due: new Date(now + 3 * DAY).toISOString().slice(0, 10), borrowerName: "Carlos and Ana Ruiz", borrowerPhone: "(309) 555-0122", borrowerEmail: "ruiz.family@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@fsbdemo.apprifi.com", notes: "Two dogs, friendly. Detached workshop counts as outbuilding."}, ago(9));
+  const D = await place({addr: "305 S Main St", city: "Deer Creek, IL 61733", loan: "2026-004288", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Seller occupied", premise: "As improved (subject to listed repairs)", pins: "05-27-306-011", refNo: "LN-2026-0052", closingDate: new Date(now + 6 * DAY).toISOString().slice(0, 10), due: new Date(now + 3 * DAY).toISOString().slice(0, 10), borrowerName: "Carlos and Ana Ruiz", borrowerPhone: "(309) 555-0122", borrowerEmail: "ruiz.family@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@demo.apprifi.com", notes: "Two dogs, friendly. Detached workshop counts as outbuilding."}, ago(9));
   await addDoc(D, "sales-contract-305-s-main.pdf", "contract", "contract", desk.name, "desk", false, ago(9));
   await act(D.id, "accept", {fee: 550, etaDate: new Date(now + 1 * DAY).toISOString().slice(0, 10)}, apr, ago(8, 22));
   await act(D.id, "schedule", {}, apr, ago(8, 20));
@@ -102,13 +102,13 @@ export async function resetDemo(env, base, h) {
   await act(H.id, "cancel", {reason: "Loan withdrawn", note: "Buyer walked after inspection."}, deskActor, ago(6, 4));
 
   // G: on hold
-  const G = await place({addr: "540 Countryside Rd", city: "Tremont, IL 61568", loan: "2026-004315", purpose: "Refinance", loanType: "Portfolio / in-house", propertyType: "Farm / agricultural", type: "Agricultural / farm / land", pins: "07-22-100-004, 07-22-100-005", due: new Date(now + 6 * DAY).toISOString().slice(0, 10), borrowerName: "Gene Albrecht", borrowerPhone: "(309) 555-0144", borrowerEmail: "", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@fsbdemo.apprifi.com", notes: "No email on file; phone only."}, ago(6));
+  const G = await place({addr: "540 Countryside Rd", city: "Tremont, IL 61568", loan: "2026-004315", purpose: "Refinance", loanType: "Portfolio / in-house", propertyType: "Farm / agricultural", type: "Agricultural / farm / land", pins: "07-22-100-004, 07-22-100-005", due: new Date(now + 6 * DAY).toISOString().slice(0, 10), borrowerName: "Gene Albrecht", borrowerPhone: "(309) 555-0144", borrowerEmail: "", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@demo.apprifi.com", notes: "No email on file; phone only."}, ago(6));
   await act(G.id, "accept", {fee: 550}, apr, ago(5, 22));
   await act(G.id, "schedule", {}, apr, ago(5, 20));
   await act(G.id, "hold", {reason: "Cannot reach contact", note: "Three calls and two texts since Monday, no answer. Desk, can you reach him?"}, apr, ago(3));
 
   // C: scheduled (inspection coming up)
-  const C = await place({addr: "77 Prairie View Dr", city: "Heritage Lake, IL 61755", loan: "2026-004330", purpose: "Refinance", loanType: "Conventional", propertyType: "Single family", occupancy: "Owner occupied", pins: "07-14-410-018", refNo: "FSB-2026-0058", due: new Date(now + 9 * DAY).toISOString().slice(0, 10), borrowerName: "Angela Moss", borrowerPhone: "(309) 555-0155", borrowerEmail: "angela.moss@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@fsbdemo.apprifi.com", notes: "Finished basement added 2023; permits in the file."}, ago(5));
+  const C = await place({addr: "77 Prairie View Dr", city: "Heritage Lake, IL 61755", loan: "2026-004330", purpose: "Refinance", loanType: "Conventional", propertyType: "Single family", occupancy: "Owner occupied", pins: "07-14-410-018", refNo: "LN-2026-0058", due: new Date(now + 9 * DAY).toISOString().slice(0, 10), borrowerName: "Angela Moss", borrowerPhone: "(309) 555-0155", borrowerEmail: "angela.moss@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@demo.apprifi.com", notes: "Finished basement added 2023; permits in the file."}, ago(5));
   await addDoc(C, "prior-appraisal-77-prairie-view-2021.pdf", "prior", "report", desk.name, "desk", false, ago(5));
   await act(C.id, "accept", {fee: 550, etaDate: new Date(now + 8 * DAY).toISOString().slice(0, 10)}, apr, ago(4, 22));
   await act(C.id, "schedule", {}, apr, ago(4, 20));
@@ -122,13 +122,13 @@ export async function resetDemo(env, base, h) {
   await h.writeEvents(env, C.id, [{at: ago(1, 2), who: "Angela Moss", role: "client", what: "Angela Moss uploaded basement-permit-2023.pdf."}]);
 
   // B: scheduling, waiting on the borrower to pick a time
-  const B = await place({addr: "812 N Roosevelt Ave", city: "Bloomington, IL 61701", loan: "2026-004417", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Seller occupied", pins: "14-33-152-009", refNo: "FSB-2026-0063", closingDate: new Date(now + 14 * DAY).toISOString().slice(0, 10), accessNotes: "Gate code 4471. Dog in the yard, text before arriving.", due: new Date(now + 12 * DAY).toISOString().slice(0, 10), borrowerName: "Evan Marsh", borrowerPhone: "(309) 555-0166", borrowerEmail: "evan.marsh@example.com", agentName: "Dale Prince, Prairie Homes", agentPhone: "(309) 555-0177", agentEmail: "dale@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@fsbdemo.apprifi.com", notes: "Gate code 4471. Dog in the yard, please text before arriving."}, ago(3));
+  const B = await place({addr: "812 N Roosevelt Ave", city: "Bloomington, IL 61701", loan: "2026-004417", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Seller occupied", pins: "14-33-152-009", refNo: "LN-2026-0063", closingDate: new Date(now + 14 * DAY).toISOString().slice(0, 10), accessNotes: "Gate code 4471. Dog in the yard, text before arriving.", due: new Date(now + 12 * DAY).toISOString().slice(0, 10), borrowerName: "Evan Marsh", borrowerPhone: "(309) 555-0166", borrowerEmail: "evan.marsh@example.com", agentName: "Dale Prince, Prairie Homes", agentPhone: "(309) 555-0177", agentEmail: "dale@example.com", accessVia: "Borrower", officerName: "Lee Whitcomb", officerEmail: "officer@demo.apprifi.com", notes: "Gate code 4471. Dog in the yard, please text before arriving."}, ago(3));
   await addDoc(B, "sales-contract-812-roosevelt.pdf", "contract", "contract", desk.name, "desk", false, ago(3));
   await act(B.id, "accept", {fee: 550, etaDate: new Date(now + 10 * DAY).toISOString().slice(0, 10)}, apr, ago(2, 23));
   await act(B.id, "schedule", {}, apr, ago(2, 20));
 
   // A: just placed
-  const A = await place({addr: "1420 Sycamore Ln", city: "Mackinaw, IL 61755", loan: "2026-004452", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Seller occupied", pins: "07-14-302-011", refNo: "FSB-2026-0064", closingDate: new Date(now + 16 * DAY).toISOString().slice(0, 10), earliestInspection: new Date(now + 2 * DAY).toISOString().slice(0, 10), intendedUse: "Mortgage lending; First Security Bank is the only intended user.", due: new Date(now + 14 * DAY).toISOString().slice(0, 10), borrowerName: "Dana Whitfield", borrowerPhone: "(309) 555-0188", borrowerEmail: "dana.whitfield@example.com", agentName: "Marcy Teague, Kestrel Realty", agentPhone: "(309) 555-0199", agentEmail: "marcy@example.com", accessVia: "Agent", officerName: "Lee Whitcomb", officerEmail: "officer@fsbdemo.apprifi.com", notes: "Seller occupied until closing. Agent coordinates access.", rush: true}, ago(0, 2));
+  const A = await place({addr: "1420 Sycamore Ln", city: "Mackinaw, IL 61755", loan: "2026-004452", purpose: "Purchase", loanType: "Conventional", propertyType: "Single family", occupancy: "Seller occupied", pins: "07-14-302-011", refNo: "LN-2026-0064", closingDate: new Date(now + 16 * DAY).toISOString().slice(0, 10), earliestInspection: new Date(now + 2 * DAY).toISOString().slice(0, 10), intendedUse: "Mortgage lending; the lender is the only intended user.", due: new Date(now + 14 * DAY).toISOString().slice(0, 10), borrowerName: "Dana Whitfield", borrowerPhone: "(309) 555-0188", borrowerEmail: "dana.whitfield@example.com", agentName: "Marcy Teague, Kestrel Realty", agentPhone: "(309) 555-0199", agentEmail: "marcy@example.com", accessVia: "Agent", officerName: "Lee Whitcomb", officerEmail: "officer@demo.apprifi.com", notes: "Seller occupied until closing. Agent coordinates access.", rush: true}, ago(0, 2));
   await addDoc(A, "sales-contract-1420-sycamore.pdf", "contract", "contract", desk.name, "desk", false, ago(0, 2));
 
   await env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(h.nowISO(), "Demonstration", "Sample data loaded. Resets every night.").run();

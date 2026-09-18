@@ -17,6 +17,34 @@ var CORE = (function(){
     officer:{name:"Loan officer",hint:"Read only. Sees status, downloads the finished report. Cannot touch the order, which keeps the independence record clean."},
     appraiser:{name:"Appraiser",hint:"Accepts, schedules, inspects, delivers the report and invoice, sets availability."}
   };
+  /* Who the client is. Lenders need the recusal attestation and lending vocabulary; estate attorneys and wealth
+     managers order the same appraisals for estates, trusts, gifting and planning, with their own titles and no
+     credit decision to recuse from. The four roles keep their keys; only their names, hints and wording change. */
+  var CLIENT_TYPES = {
+    lender:{key:"lender",word:"lender",staff:"loan officer",refLabel:"Loan number",refHint:"2026-004417",attest:true,
+      roles:{admin:["Lender admin","Manages who can sign in and what they may do. Sees every order. Does not place orders."],
+             desk:["Appraisal desk","Loan officer assistant. Places, edits and cancels orders, uploads documents, sends questions."],
+             officer:["Loan officer","Read only. Sees status, downloads the finished report. Cannot touch the order, which keeps the independence record clean."]},
+      deliveredLabel:"Report delivered to your lender",recordName:"independence record",recordTitle:"APPRAISER INDEPENDENCE RECORD"},
+    firm:{key:"firm",word:"attorney's office",staff:"attorney",refLabel:"Matter or file number",refHint:"2026-EST-0117",attest:false,
+      roles:{admin:["Firm administrator","Manages who can sign in and what they may do. Sees every matter. Does not place orders."],
+             desk:["Paralegal","Places, edits and cancels orders, uploads documents, keeps the appraiser supplied with what they need."],
+             officer:["Attorney","Read only. Sees the status of every appraisal the firm has ordered and downloads the finished report."]},
+      deliveredLabel:"Report delivered to your attorney",recordName:"order record",recordTitle:"APPRAISAL ORDER RECORD"},
+    wealth:{key:"wealth",word:"advisor's office",staff:"advisor",refLabel:"Client or account reference",refHint:"Trust 2026-044",attest:false,
+      roles:{admin:["Firm administrator","Manages who can sign in and what they may do. Sees every order. Does not place orders."],
+             desk:["Coordinator","Places, edits and cancels orders, uploads documents, keeps the appraiser supplied with what they need."],
+             officer:["Advisor","Read only. Sees the status of every appraisal ordered for a client and downloads the finished report."]},
+      deliveredLabel:"Report delivered to your advisor",recordName:"order record",recordTitle:"APPRAISAL ORDER RECORD"}
+  };
+  var CT = CLIENT_TYPES.lender;
+  function setClientType(t){
+    CT = CLIENT_TYPES[t] || CLIENT_TYPES.lender;
+    ["admin","desk","officer"].forEach(function(k){ ROLES[k].name = CT.roles[k][0]; ROLES[k].hint = CT.roles[k][1]; });
+    CLIENT_LABEL.Delivered = CT.deliveredLabel;
+    return CT;
+  }
+  function clientType(){ return CT; }
   /* product catalogue: name, whether an XML (MISMO/UAD) file is normally required, and what the appraiser needs before starting */
   var PRODUCTS = [
     {name:"1004 URAR",xml:true,needs:"Sales contract for purchases."},
@@ -39,7 +67,7 @@ var CORE = (function(){
     {name:"Updated appraisal (as is)",xml:false,needs:"Original report."}
   ];
   var REPORT_TYPES = PRODUCTS.map(function(p){ return p.name; });
-  var PURPOSES = ["Purchase","Refinance","Construction","Purchase and improvement","Home equity","Additional collateral","Estate","Other"];
+  var PURPOSES = ["Purchase","Refinance","Construction","Purchase and improvement","Home equity","Additional collateral","Estate","Trust or gift","Divorce or partition","Tax appeal","Other"];
   var LOAN_TYPES = ["Conventional","Portfolio / in-house","FHA","VA","USDA-RD","Construction","Commercial","HELOC","Not a loan"];
   var PREMISES = ["As is","As completed (subject to plans and specs)","As improved (subject to listed repairs)","Final inspection only","Updated appraisal","Retrospective (date of death)"];
   var OCCUPANCY = ["Owner occupied","Tenant occupied","Vacant","Seller occupied","Under construction"];
@@ -148,7 +176,7 @@ var CORE = (function(){
     if(n&&p) return n+", "+p+"."; if(n) return n+"."; if(p) return "Your appraiser, "+p+"."; return lenderName(cfg)+"."; }
   function qLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?(" Questions: "+p+"."):""; }
   function assignedLine(cfg){ var n=apr(cfg); return n?(" "+n+" is your appraiser."):""; }
-  function contactLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?("Questions? Call "+aprLower(cfg)+" at "+p+"."):("Questions? Contact your loan officer at "+lenderName(cfg)+"."); }
+  function contactLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?("Questions? Call "+aprLower(cfg)+" at "+p+"."):("Questions? Contact your "+CT.staff+" at "+lenderName(cfg)+"."); }
   function money(n){ n=Number(n)||0; return "$"+n.toLocaleString("en-US"); }
 
   /* who gets what. Each message: {channel:"email"|"sms", party:"borrower"|"agent"|"desk"|"appraiser"|"officer", subject, body}
@@ -199,7 +227,7 @@ var CORE = (function(){
     delivered:function(o,c){ var m=[
       {channel:"email",party:"desk",subject:"Appraisal delivered: "+o.addr,body:"The appraisal report for "+o.addr+" has been delivered through the portal and is available to download. [portal]"},
       {channel:"email",party:"borrower",subject:"Your appraisal copy: "+o.addr,
-       body:"A copy of the appraisal for "+o.addr+" is available to you at no charge: [link]. You are receiving this electronically because you agreed to electronic delivery. To receive a paper copy instead at no charge, reply to this message or call your loan officer at "+lenderName(c)+"."}
+       body:"A copy of the appraisal for "+o.addr+" is available to you at no charge: [link]. You are receiving this electronically because you agreed to electronic delivery. To receive a paper copy instead at no charge, reply to this message or call your "+CT.staff+" at "+lenderName(c)+"."}
     ]; if(o.officerName) m.push({channel:"email",party:"officer",subject:"Appraisal delivered: "+o.addr,body:"The report for "+o.addr+" is in the portal. [portal]"}); return m; },
     invoiced:function(o,c){ return [
       {channel:"email",party:"desk",subject:"Invoice: "+o.addr,body:"The invoice for the appraisal at "+o.addr+(o.fee?(" in the amount of "+money(o.fee)):"")+" is in the portal. "+aprSig(c)+" [portal]"}
@@ -423,7 +451,7 @@ var CORE = (function(){
            the client posts from their status page. Every entry is logged on the independence record. */
         var to=p.to==="client"?"client":"staff";
         if(role==="client"){ to="staff"; }
-        else if(!can(role,"post")) fail("forbidden","Loan officers read the conversation but do not take part, which keeps the independence record clean.");
+        else if(!can(role,"post")) fail("forbidden",ROLES.officer.name+"s read the conversation but do not take part; route anything through the "+ROLES.desk.name.toLowerCase()+".");
         if(to==="client"&&!can(role,"postclient")) fail("forbidden","Only the desk or the appraiser messages the client.");
         if(to==="client"&&!o.clientContacted) fail("stale","The client has not been contacted yet; the appraiser accepts the order first.");
         var text=String(p.text||"").trim().slice(0,2000);
@@ -505,7 +533,7 @@ var CORE = (function(){
     return due.filter(function(k){ return nowMs-last(k)>24*H; });
   }
 
-  return {STEPS:STEPS,CLIENT_LABEL:CLIENT_LABEL,ROLES:ROLES,PRODUCTS:PRODUCTS,REPORT_TYPES:REPORT_TYPES,PURPOSES:PURPOSES,ACCESS:ACCESS,
+  return {STEPS:STEPS,CLIENT_LABEL:CLIENT_LABEL,ROLES:ROLES,CLIENT_TYPES:CLIENT_TYPES,setClientType:setClientType,clientType:clientType,PRODUCTS:PRODUCTS,REPORT_TYPES:REPORT_TYPES,PURPOSES:PURPOSES,ACCESS:ACCESS,
     LOAN_TYPES:LOAN_TYPES,PREMISES:PREMISES,OCCUPANCY:OCCUPANCY,PROPERTY_TYPES:PROPERTY_TYPES,DELIVERY_FORMATS:DELIVERY_FORMATS,REVISION_KINDS:REVISION_KINDS,PAY_METHODS:PAY_METHODS,
     lenderName:lenderName,nudgesDue:nudgesDue,
     DOC_KINDS:DOC_KINDS,HOLD_REASONS:HOLD_REASONS,DECLINE_REASONS:DECLINE_REASONS,CANCEL_REASONS:CANCEL_REASONS,PERM:PERM,can:can,
@@ -521,7 +549,7 @@ var CORE = (function(){
   var S = {
     me:null, view:"board", sel:null, tab:"status", orders:[], detail:{}, config:null, feedback:[], users:[], audit:[], messages:[], inbound:[],
     busy:false, toastT:null, boot:"loading", bootWhy:"", token:null, client:null, invite:null, inviteCode:null, provisioned:true,
-    providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv", demo:false, brand:{name:"Your Lender",tagline:"",primary:"#1f4984",accent:"#790000",logo:"",productName:"Appraisal Desk"}, appraisers:[]
+    providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv", demo:false, brand:{name:"Your Lender",tagline:"",primary:"#12324f",accent:"#d4652a",logo:"",productName:"Apprifi"}, appraisers:[]
   };
 
   /* ---------- helpers ---------- */
@@ -600,7 +628,8 @@ var CORE = (function(){
     h.split("&").forEach(function(kv){ var m=/^([a-z]+)=(.+)$/i.exec(kv); if(m) out[m[1]]=decodeURIComponent(m[2]); });
     return out;
   }
-  function lender(){ return (S.brand&&S.brand.name)||"your lender"; }
+  function lender(){ return (S.brand&&S.brand.name)||"your "+CT().word; }
+  function CT(){ return CORE.clientType(); }
   function shade(hex,f){ var m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||""); if(!m) return hex; return "#"+[1,2,3].map(function(i){ var v=Math.round(parseInt(m[i],16)*f); return ("0"+Math.max(0,Math.min(255,v)).toString(16)).slice(-2); }).join(""); }
   function applyBrand(b){
     if(!b) return; S.brand=b;
@@ -608,15 +637,18 @@ var CORE = (function(){
     var on=function(hex){ var m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||""); if(!m) return "#ffffff"; var L=[1,2,3].map(function(i){ var v=parseInt(m[i],16)/255; return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4); }); var lum=0.2126*L[0]+0.7152*L[1]+0.0722*L[2]; return lum>0.35?"#111820":"#ffffff"; };
     var native=!!(window.CSS&&CSS.supports&&CSS.supports("color","contrast-color(red)"));
     st.textContent=":root{--navy:"+b.primary+";--navy-deep:"+shade(b.primary,0.78)+";--red:"+b.accent+(native?"":";--on-navy:"+on(b.primary)+";--on-red:"+on(b.accent))+"}";
-    document.title=b.name+" "+(b.productName||"Appraisal Desk");
-    var logo=document.querySelector(".logo"), wrap=document.querySelector(".topin");
-    if(b.logo){ if(!logo){ logo=document.createElement("img"); logo.className="logo"; wrap.insertBefore(logo,wrap.firstChild); var t=document.querySelector(".textlogo"); if(t) t.remove(); } logo.src=b.logo; logo.alt=b.name; }
-    else { if(logo) logo.remove(); var tl=document.querySelector(".textlogo"); if(!tl){ tl=document.createElement("div"); tl.className="textlogo"; wrap.insertBefore(tl,wrap.firstChild); } tl.innerHTML='<b>'+esc(b.name)+'</b>'+(b.tagline?'<span>'+esc(b.tagline)+'</span>':''); }
+    document.title=(b.productName||"Apprifi")+" \u00b7 "+b.name;
+    /* the lockup: Apprifi, then the lender as the client (its own logo if it uploaded one, otherwise its name) */
+    var wrap=document.querySelector(".topin"), lock=wrap.querySelector(".brandlock");
+    if(!lock){ lock=document.createElement("a"); lock.className="brandlock"; lock.href="./"; wrap.insertBefore(lock,wrap.firstChild); }
+    lock.innerHTML='<img class="plogo" src="/apprifi-logo.svg" alt="'+esc(b.productName||"Apprifi")+'" width="152" height="40">'+
+      '<span class="lsep" aria-hidden="true"></span>'+
+      (b.logo?'<img class="llogo" src="'+esc(b.logo)+'" alt="'+esc(b.name)+'">':'<span class="lname"><b>'+esc(b.name)+'</b>'+(b.tagline?'<span>'+esc(b.tagline)+'</span>':'')+'</span>');
     var h1=document.querySelector(".mast h1"), tag=document.querySelector(".mast .tag");
-    if(h1) h1.textContent=b.productName||"Appraisal Desk";
-    if(tag) tag.textContent="Order intake, live status, inspection scheduling and report delivery between "+b.name+" and its appraisers.";
+    if(h1) h1.textContent=(b.productName||"Apprifi")+" for "+b.name;
+    if(tag) tag.textContent="Appraisal orders, live status, inspection scheduling and report delivery between "+b.name+" and its appraisers.";
   }
-  function brandline(){ return '<p class="brandline">'+esc(lender())+(S.brand.tagline?' &middot; '+esc(S.brand.tagline):'')+'</p>'; }
+  function brandline(){ return '<p class="brandline">'+esc(lender())+(S.brand.tagline?' &middot; '+esc(S.brand.tagline):'')+' &middot; <a href="https://apprifi.com" rel="noopener">Powered by Apprifi</a></p>'; }
   function homeFor(role){ return role==="appraiser"?"queue":(role==="admin"?"people":"board"); }
   function navFor(role){
     if(role==="desk")      return [["board","Order board"],["new","New order"],["outbox","Outbox"],["feedback","Feedback"]];
@@ -671,14 +703,14 @@ var CORE = (function(){
       return api("GET","/api/invite/"+encodeURIComponent(h.invite)).then(function(d){ S.invite=d; render(); }).catch(function(e){ S.invite={error:e.message}; render(); });
     }
     api("GET","/api/session").then(function(d){
-      S.boot="ready"; S.provisioned=d.provisioned!==false; S.providers=d.providers||S.providers; S.storage=d.storage||"kv"; S.demo=!!d.demo; applyBrand(d.brand); S.appraisers=d.appraisers||[];
+      S.boot="ready"; S.provisioned=d.provisioned!==false; S.providers=d.providers||S.providers; S.storage=d.storage||"kv"; S.demo=!!d.demo; CORE.setClientType(d.clientType); applyBrand(d.brand); S.appraisers=d.appraisers||[];
       if(S.demo){ S.mfilter="all"; demoBar(); }
       if(S.demo&&!S.provisioned){ render(); return api("POST","/api/demo/reset",{}).then(function(){ return api("GET","/api/session"); }).then(function(d2){ S.provisioned=d2.provisioned!==false; render(); }).catch(function(e){ S.boot="offline"; S.bootWhy=e.message; render(); }); }
       if(d.user) afterSignIn(d.user,d); else render();
     }).catch(function(e){ S.boot="offline"; S.bootWhy=e.message; render(); });
   }
   function loadClient(){
-    return api("GET","/api/client/"+encodeURIComponent(S.token)).then(function(d){ S.client=d; S.config={timeZone:d.tz,slotMinutes:d.slotMinutes}; if(d.lender) applyBrand({name:d.lender.name,tagline:d.lender.tagline,logo:d.lender.logo,primary:d.lender.primary,accent:d.lender.accent,productName:"Appraisal Desk"}); S.boot="ready"; render(); })
+    return api("GET","/api/client/"+encodeURIComponent(S.token)).then(function(d){ S.client=d; CORE.setClientType(d.clientType); S.config={timeZone:d.tz,slotMinutes:d.slotMinutes}; if(d.lender) applyBrand({name:d.lender.name,tagline:d.lender.tagline,logo:d.lender.logo,primary:d.lender.primary,accent:d.lender.accent,productName:"Apprifi"}); S.boot="ready"; render(); })
       .catch(function(e){ S.client={error:e.message,status:e.status}; S.boot="ready"; render(); });
   }
 
@@ -748,7 +780,7 @@ var CORE = (function(){
     bar.innerHTML='DEMONSTRATION <em>Sample people and orders. Nothing is sent to anyone. The data resets every night.</em>';
     document.body.insertBefore(bar,document.body.firstChild);
   }
-  var DEMO_ROLES=[["desk","Appraisal desk","Place and manage orders","desk@fsbdemo.apprifi.com"],["appraiser","Appraiser","Accept, schedule, deliver","appraiser@fsbdemo.apprifi.com"],["officer","Loan officer","Watch status, download the report","officer@fsbdemo.apprifi.com"],["admin","Lender administrator","People and settings","admin@fsbdemo.apprifi.com"]];
+  var DEMO_ROLES=[["desk","Appraisal desk","Place and manage orders","desk@demo.apprifi.com"],["appraiser","Appraiser","Accept, schedule, deliver","appraiser@demo.apprifi.com"],["officer","Loan officer","Watch status, download the report","officer@demo.apprifi.com"],["admin","Lender administrator","People and settings","admin@demo.apprifi.com"]];
   function demoSigninHtml(){
     return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Try the portal</h2>'+
       '<p class="note">This is a demonstration copy with sample orders at every stage. Pick who you want to be. Everyone sees the same live data, so open two browser windows to watch a change made by one person appear for another.</p></div></div>'+
@@ -767,7 +799,7 @@ var CORE = (function(){
     if(!S.provisioned) return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Not yet in service</h2>'+
       '<p class="note">This portal has been installed for '+esc(lender())+' but the lender has not yet designated its administrator. Once the lender names that person, they receive an invitation, set their password, and add everyone else.</p></div></div></div></div>';
     return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Sign in</h2>'+
-      '<p class="note">Access is granted by the portal administrator at '+esc(lender())+'. Use the email and password you chose from your invitation. Your role (appraisal desk, loan officer, appraiser or administrator) is assigned by the lender and decides which screens you see.</p></div></div>'+
+      '<p class="note">Access is granted by the portal administrator at '+esc(lender())+'. Use the email and password you chose from your invitation. Your role ('+esc(ROLES.desk.name.toLowerCase())+', '+esc(ROLES.officer.name.toLowerCase())+', appraiser or administrator) is assigned by '+esc(lender())+' and decides which screens you see.</p></div></div>'+
       '<div class="pb"><form class="stack" id="signinForm">'+
       '<label class="f">Work email<input id="si_email" type="email" autocomplete="username" inputmode="email"></label>'+
       '<label class="f">Password<input id="si_pw" type="password" autocomplete="current-password"></label>'+
@@ -823,12 +855,13 @@ var CORE = (function(){
   }
   function brandSettingsHtml(){
     var b=S.brand||{};
-    return '<div class="panel"><div class="ph"><div><h2>Lender branding</h2><p class="note">How the portal presents itself to staff, borrowers and agents. Every message is sent in this name.</p></div>'+
+    return '<div class="panel"><div class="ph"><div><h2>Lender identity</h2><p class="note">How '+esc(b.name||"your lender")+' appears beside Apprifi to staff, borrowers and agents. Every message goes out in the lender\'s name. Your own logo and colors are optional; leave them and the portal keeps the Apprifi look.</p></div>'+
       '<button class="btn btn-p btn-s" data-a="savebrand">Save</button></div><div class="pb"><div class="stack">'+
-      '<div class="grid3"><label class="f">Lender name<input id="br_name" value="'+esc(b.name||"")+'"></label><label class="f">Short name<input id="br_short" value="'+esc(b.short||"")+'"></label><label class="f">Product name<input id="br_product" value="'+esc(b.productName||"Appraisal Desk")+'"></label></div>'+
-      '<div class="grid2"><label class="f">Tagline or locations (shown under the logo and on client pages)<input id="br_tagline" value="'+esc(b.tagline||"")+'"></label><label class="f">Time zone<input id="br_tz" value="'+esc(b.timeZone||"America/Chicago")+'" placeholder="America/Chicago"></label></div>'+
-      '<div class="grid3"><label class="f">Primary color<input id="br_primary" type="color" value="'+esc(b.primary||"#1f4984")+'"></label><label class="f">Accent color<input id="br_accent" type="color" value="'+esc(b.accent||"#790000")+'"></label>'+
-      '<label class="f">Logo (PNG, JPG, SVG under 1 MB)<input id="br_logo" type="file" accept=".png,.jpg,.jpeg,.webp,.svg"></label></div>'+
+      '<div class="grid3"><label class="f">Lender name<input id="br_name" value="'+esc(b.name||"")+'"></label><label class="f">Short name<input id="br_short" value="'+esc(b.short||"")+'"></label><label class="f">Time zone<input id="br_tz" value="'+esc(b.timeZone||"America/Chicago")+'" placeholder="America/Chicago"></label></div>'+
+      '<div class="grid2"><label class="f">Tagline or locations (shown beside the name and on client pages)<input id="br_tagline" value="'+esc(b.tagline||"")+'"></label><label class="f">Support line shown at the foot of every email, optional<input id="br_support" value="'+esc(b.supportLine||"")+'" placeholder="Questions? Call the appraisal desk at (309) 555-0100."></label></div>'+
+      '<div class="grid3"><label class="f">Primary color<input id="br_primary" type="color" value="'+esc(b.primary||"#12324f")+'"></label><label class="f">Accent color<input id="br_accent" type="color" value="'+esc(b.accent||"#d4652a")+'"></label>'+
+      '<label class="f">Your logo, optional (PNG, JPG, SVG under 1 MB)<input id="br_logo" type="file" accept=".png,.jpg,.jpeg,.webp,.svg"></label></div>'+
+      '<div class="row"><button class="btn btn-s" type="button" data-a="apprificolors">Back to the Apprifi colors</button></div>'+
       '</div></div></div>';
   }
   function adminSettingsHtml(){
@@ -858,12 +891,12 @@ var CORE = (function(){
       "Add and create link","saveperson");
   }
   function inviteLinkSheet(name,email,link,days,emailed){
-    var body="Hello "+name+",\n\nYou have been given access to the "+lender()+" Appraisal Desk. Open this link to choose your password (it works once and expires in "+days+" days):\n\n"+link+"\n\nAfter that, sign in at "+location.origin+location.pathname+" with your work email.";
+    var body="Hello "+name+",\n\nYou have been given access to Apprifi for "+lender()+". Open this link to choose your password (it works once and expires in "+days+" days):\n\n"+link+"\n\nAfter that, sign in at "+location.origin+location.pathname+" with your work email.";
     return '<div class="sheet" data-a="closesheet"><div class="sheetc" data-stop="1"><div class="stack">'+
       '<div><h2 style="font-size:17px">Sign-in link for '+esc(name)+'</h2><p class="sm muted" style="margin-top:3px">'+(emailed?'<b>Emailed to '+esc(email)+'.</b> The same link is here in case they need it another way.':'Send this to '+esc(email)+'.')+' It works once and expires in '+days+' days. It is not shown again, but you can issue a new one at any time.</p></div>'+
       '<div class="invlink">'+esc(link)+'</div>'+
       '<div class="row"><button class="btn btn-p" data-copy="'+esc(link)+'" data-what="Link">Copy link</button>'+
-      '<a class="btn" href="mailto:'+esc(encodeURIComponent(email))+'?subject='+esc(encodeURIComponent("Your "+lender()+" Appraisal Desk sign-in"))+'&body='+esc(encodeURIComponent(body))+'">Send by email</a>'+
+      '<a class="btn" href="mailto:'+esc(encodeURIComponent(email))+'?subject='+esc(encodeURIComponent("Your Apprifi sign-in for "+lender()))+'&body='+esc(encodeURIComponent(body))+'">Send by email</a>'+
       '<button class="btn" data-a="closesheet">Done</button></div></div></div></div>';
   }
 
@@ -889,7 +922,7 @@ var CORE = (function(){
   }
   function boardHtml(readonly){
     var list=filtered(), title=readonly?"Order status":"Order board";
-    var head='<div class="panel"><div class="ph"><div><h2>'+title+'</h2><p class="note">'+S.orders.length+' order'+(S.orders.length===1?"":"s")+' on file. '+(readonly?"Read only: loan officers and the administrator see status and download the finished report.":"Click any row to open it.")+'</p></div>'+
+    var head='<div class="panel"><div class="ph"><div><h2>'+title+'</h2><p class="note">'+S.orders.length+' order'+(S.orders.length===1?"":"s")+' on file. '+(readonly?"Read only: "+ROLES.officer.name.toLowerCase()+"s and the administrator see status and download the finished report.":"Click any row to open it.")+'</p></div>'+
       (readonly?'<span class="pill wait">View only</span>':'<button class="btn btn-p" data-a="gonew">New order</button>')+'</div><div class="pb" style="padding-bottom:0">'+filtersHtml()+'</div>';
     if(!list.length) return head+'<div class="empty"><b>'+(S.orders.length?"Nothing matches":"No orders yet")+'</b>'+(S.orders.length?"Try another filter.":(readonly?"Orders placed by the desk will appear here.":"Place the first one and it appears for everyone immediately."))+'</div></div>';
     var rows=list.map(function(o){
@@ -969,7 +1002,7 @@ var CORE = (function(){
       compose='<div class="stack-s" style="margin-top:10px"><label class="f">Message<textarea id="tbox" placeholder="'+(role==="appraiser"?"Answer a question, flag an access problem, or tell the desk what you need.":"Additional property information, a factual correction, or a timing question.")+'"></textarea></label>'+
         '<div class="row"><label class="f" style="margin:0"><span class="sm muted">Send to</span><select id="tto">'+opts+'</select></label><button class="btn btn-p btn-s" data-a="post">Send</button></div>'+
         (role!=="appraiser"?'<div class="callout"><b>Value cannot be discussed.</b> Messages are limited to factual corrections, additional property information and timing. Everything here is logged on the Record tab.</div>':'')+'</div>';
-    } else if(open&&role==="officer") compose='<p class="sm muted" style="margin-top:8px">Loan officers read the conversation but do not take part, which keeps the independence record clean. Route anything through the appraisal desk.</p>';
+    } else if(open&&role==="officer") compose='<p class="sm muted" style="margin-top:8px">'+esc(ROLES.officer.name)+'s read the conversation but do not take part'+(CT().attest?', which keeps the independence record clean':'')+'. Route anything through the '+esc(ROLES.desk.name.toLowerCase())+'.</p>';
     return '<div class="stack-s thread">'+items+compose+'</div>';
   }
   function detailHtml(o){
@@ -983,8 +1016,9 @@ var CORE = (function(){
     else if(S.tab==="thread") body=threadHtml(o);
     else if(S.tab==="msgs") body='<div class="stack-s"><p class="sm muted">Automatic notices sent by the portal as the file moved. Replies from the borrower or agent land on the Conversation tab.</p>'+((o.messages||[]).length?(o.messages||[]).slice().reverse().map(function(m){ return msgHtml(m,false); }).join(""):'<p class="sm muted">No notices yet.</p>')+'</div>';
     else if(S.tab==="log") body='<div class="stack">'+
-      '<div class="callout"><b>Independence record.</b> Who ordered the file and under what role, the recusal attestation, every status change, message, document and client download, written by the server and never editable from this screen. Export it for an examiner or a reviewer.</div>'+
-      logHtml(o)+'<div><a class="btn btn-s" href="/api/orders/'+esc(o.id)+'/log.txt" download>Export independence record</a></div></div>';
+      (CT().attest?'<div class="callout"><b>Independence record.</b> Who ordered the file and under what role, the recusal attestation, every status change, message, document and client download, written by the server and never editable from this screen. Export it for an examiner or a reviewer.</div>'
+        :'<div class="callout"><b>Order record.</b> Who ordered the appraisal and under what role, every status change, message, document and client download, written by the server and never editable from this screen. Export it for the file.</div>')+
+      logHtml(o)+'<div><a class="btn btn-s" href="/api/orders/'+esc(o.id)+'/log.txt" download>Export '+(CT().attest?'independence record':'order record')+'</a></div></div>';
     else {
       var nextc="";
       if(o.cancelled) nextc='<div class="callout"><b>Cancelled.</b> '+esc(o.cancelReason||"")+'</div>';
@@ -1015,7 +1049,7 @@ var CORE = (function(){
         '<dt>Agent</dt><dd>'+esc(o.agentName||"None")+(o.agentPhone?'<span class="tiny mono">'+esc(o.agentPhone)+'</span>':"")+(o.agentEmail?'<span class="tiny">'+esc(o.agentEmail)+'</span>':"")+'</dd>'+
         '<dt>Access</dt><dd>'+esc(o.accessVia||"Borrower")+'</dd>'+
         '<dt>Ordered by</dt><dd>'+esc(o.orderedBy||"")+'<span class="tiny">'+esc(fmtTime(o.orderedAt))+'</span></dd>'+
-        (o.officerName?'<dt>Loan officer</dt><dd>'+esc(o.officerName)+(o.officerEmail?'<span class="tiny">'+esc(o.officerEmail)+'</span>':"")+'</dd>':"")+
+        (o.officerName?'<dt>'+esc(ROLES.officer.name)+'</dt><dd>'+esc(o.officerName)+(o.officerEmail?'<span class="tiny">'+esc(o.officerEmail)+'</span>':"")+'</dd>':"")+
         '<dt>Fee</dt><dd class="mono">'+(o.fee?money(o.fee):"not quoted")+'</dd>'+
         '<dt>Needed by</dt><dd class="mono">'+esc(fmtDate(o.due))+(o.rush?' <span class="flag">Rush</span>':'')+(o.closingDate?'<span class="tiny">Closing '+esc(fmtDate(o.closingDate))+'</span>':'')+(o.earliestInspection?'<span class="tiny">Inspect on or after '+esc(fmtDate(o.earliestInspection))+'</span>':'')+'</dd>'+
         (o.etaDate?'<dt>Committed</dt><dd class="mono">'+esc(fmtDate(o.etaDate))+'</dd>':'')+appt+
@@ -1041,7 +1075,7 @@ var CORE = (function(){
         '<label class="f">Property address<input id="'+p+'_addr" placeholder="812 N Roosevelt Ave" value="'+g("addr")+'"></label>'+
         '<label class="f">City, state, ZIP<input id="'+p+'_city" placeholder="Bloomington, IL 61701" value="'+g("city")+'"></label></div>'+
       '<div class="grid3">'+
-        '<label class="f">Loan number<input id="'+p+'_loan" placeholder="2026-004417" value="'+g("loan")+'"></label>'+
+        '<label class="f">'+esc(CT().refLabel)+'<input id="'+p+'_loan" placeholder="'+esc(CT().refHint)+'" value="'+g("loan")+'"></label>'+
         '<label class="f">Your reference (file or order number)<input id="'+p+'_ref" value="'+g("refNo")+'"></label>'+
         '<label class="f">Parcel numbers (PIN)<input id="'+p+'_pins" placeholder="07-14-302-011, 07-14-302-012" value="'+g("pins")+'"></label></div>'+
       '<div class="grid3">'+
@@ -1077,8 +1111,8 @@ var CORE = (function(){
         '<label class="f">Agent email<input id="'+p+'_aemail" type="email" inputmode="email" value="'+g("agentEmail")+'"></label></div>'+
       '<div class="grid3">'+
         '<label class="f">Access contact'+sel(p+"_access",CORE.ACCESS,o.accessVia||"Borrower")+'</label>'+
-        '<label class="f">Loan officer<input id="'+p+'_oname" value="'+g("officerName")+'"></label>'+
-        '<label class="f">Loan officer email<input id="'+p+'_oemail" type="email" value="'+g("officerEmail")+'"></label></div>'+
+        '<label class="f">'+esc(ROLES.officer.name)+'<input id="'+p+'_oname" value="'+g("officerName")+'"></label>'+
+        '<label class="f">'+esc(ROLES.officer.name)+' email<input id="'+p+'_oemail" type="email" value="'+g("officerEmail")+'"></label></div>'+
       '<div class="grid2"><label class="f">Access notes (gate code, dog, tenant, lockbox)<input id="'+p+'_accessnotes" value="'+g("accessNotes")+'"></label><div></div></div>'+
       '<label class="f">Notes for the appraiser<textarea id="'+p+'_notes" placeholder="Anything else the appraiser should know.">'+g("notes")+'</textarea></label>';
   }
@@ -1095,7 +1129,7 @@ var CORE = (function(){
     return '<div class="panel"><div class="ph"><div><h2>New order</h2><p class="note">One page, not a wizard. The appraiser is notified the moment you place it. You can edit it until the inspection happens, and cancel it until the report is delivered.</p></div>'+
       '<button class="btn btn-s" data-a="goboard">Cancel</button></div>'+
       '<div class="pb"><div class="stack">'+orderForm(null,"n")+
-      '<label class="att" for="n_att"><input type="checkbox" id="n_att"><span class="t"><b>Required before this order can be placed</b>I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction. This attestation is timestamped, tied to my account, and cannot be edited afterward.</span></label>'+
+      (CT().attest?'<label class="att" for="n_att"><input type="checkbox" id="n_att"><span class="t"><b>Required before this order can be placed</b>I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction. This attestation is timestamped, tied to my account, and cannot be edited afterward.</span></label>':'')+
       '<div class="callout" id="prodhint"></div>'+
       '<div class="row"><button class="btn btn-p" data-a="createorder">Place order</button><span class="sm muted">Upload the sales contract on the Documents tab once the order exists.</span></div>'+
       '</div></div></div>';
@@ -1183,10 +1217,10 @@ var CORE = (function(){
   function clientPageHtml(){
     var c=S.client;
     if(!c) return '<div class="clientwrap"><div class="panel"><div class="empty"><b>Loading your appraisal</b>One moment.</div></div></div>';
-    if(c.error) return '<div class="clientwrap"><div class="panel"><div class="empty"><b>This link is not valid</b>It may have expired, or the file may be closed. Call your loan officer and they can send you a new one.</div></div></div>';
+    if(c.error) return '<div class="clientwrap"><div class="panel"><div class="empty"><b>This link is not valid</b>It may have expired, or the file may be closed. Call your '+esc(CT().staff)+' and they can send you a new one.</div></div></div>';
     var isAgent=c.party==="agent", aprName=c.appraiser.name||"The appraiser", slotM=c.slotMinutes||60;
     var LN=(c.lender&&c.lender.name)||lender();
-    var contact=c.appraiser.phone?("Questions? Call "+(c.appraiser.name||"the appraiser")+" at "+c.appraiser.phone+"."):("Questions? Contact your loan officer at "+LN+".");
+    var contact=c.appraiser.phone?("Questions? Call "+(c.appraiser.name||"the appraiser")+" at "+c.appraiser.phone+"."):("Questions? Contact your "+CT().staff+" at "+LN+".");
     var vst=STEPS.map(function(st,i){ var cls=i<c.step?"done":(i===c.step?"now":""); return '<li class="'+cls+'"><span class="nd">'+(i<c.step?"&#10003;":"")+'</span><span class="t">'+esc(CLIENT_LABEL[st])+'</span></li>'; }).join("");
     var action;
     if(c.cancelled) action='<div class="nextc"><h4>No longer needed</h4><p>'+esc(LN)+' has closed this appraisal request. Nothing is needed from you.</p></div>';
@@ -1200,7 +1234,7 @@ var CORE = (function(){
     else if(c.step>=6) action='<div class="nextc"><h4>Your appraisal is ready</h4><p>A copy is available to you at no charge.</p>'+
         (c.report?(c.consent?'<div style="margin-top:10px"><a class="btn btn-p btn-s" href="/f/'+esc(c.orderId)+'/'+esc(c.report.id)+'?t='+esc(S.token)+'" download="'+esc(c.report.name)+'">Download my copy</a></div>'
           :'<div class="stack-s" style="margin-top:10px"><label class="chk"><input type="checkbox" id="consent">I agree to receive my appraisal copy electronically through this page instead of on paper. I can ask '+esc(LN)+' for a paper copy at no charge at any time.</label><div><button class="btn btn-p btn-s" data-a="consent">Continue to my copy</button></div></div>')
-          :'<p class="sm muted" style="margin-top:8px">Your loan officer will provide your copy.</p>')+'</div>';
+          :'<p class="sm muted" style="margin-top:8px">Your '+esc(CT().staff)+' will provide your copy.</p>')+'</div>';
     else if(c.step<=1) action='<div class="nextc"><h4>Nothing to do yet</h4><p>'+esc(aprName)+' will send a link to choose an inspection time. You will get a text and an email.</p></div>';
     else action='<div class="nextc"><h4>Nothing to do right now</h4><p>Your report is being prepared. You will hear from '+esc(LN)+' when it is delivered.</p></div>';
     var uploads='';
@@ -1217,7 +1251,7 @@ var CORE = (function(){
       '<p class="lbl">Appraisal status'+(isAgent?' &middot; listing agent':'')+'</p><h2 style="font-size:19px;margin-top:3px">'+esc(c.addr)+'</h2><p class="sm muted">'+esc(c.city)+'</p>'+
       '<ul class="vst" style="margin-top:14px">'+vst+'</ul><div style="margin-top:14px">'+action+'</div>'+uploads+msgs+
       '<p class="sm muted" style="margin-top:16px;line-height:1.5">'+esc(contact)+' This link is personal to '+esc(c.who)+' and stops working when the file closes.</p>'+
-      '</div></div><p class="sm muted" style="text-align:center;margin-top:12px">'+esc(LN)+((c.lender&&c.lender.tagline)?' &middot; '+esc(c.lender.tagline):'')+'</p></div>';
+      '</div></div><p class="sm muted" style="text-align:center;margin-top:12px">'+esc(LN)+((c.lender&&c.lender.tagline)?' &middot; '+esc(c.lender.tagline):'')+' &middot; <a href="https://apprifi.com" rel="noopener" style="color:inherit">Powered by Apprifi</a></p></div>';
   }
 
   /* ---------- render ---------- */
@@ -1355,8 +1389,7 @@ var CORE = (function(){
   function createOrder(){
     var b=readOrderForm("n");
     if(!b.addr){ toast("A property address is required."); return; }
-    if(!$("n_att").checked){ toast("The recusal attestation is required before an order can be placed."); return; }
-    b.attestation=true;
+    if(CT().attest){ if(!$("n_att").checked){ toast("The recusal attestation is required before an order can be placed."); return; } b.attestation=true; }
     if(S.busy) return; S.busy=true;
     api("POST","/api/orders",b).then(function(d){
       var o=d.order; S.detail[o.id]=null; delete S.detail[o.id]; upsert(o); S.sel=o.id; S.view="board"; S.tab="docs";
@@ -1443,10 +1476,11 @@ var CORE = (function(){
     if(a==="addperson"){ modal(personSheet()); return; }
     if(a==="addcopy"){ var ce=val("b_copy").toLowerCase(); if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ce)){ toast("Enter a valid email address."); return; } S.config=S.config||CORE.defaultConfig(); S.config.deskCopyEmails=S.config.deskCopyEmails||[]; if(S.config.deskCopyEmails.indexOf(ce)===-1) S.config.deskCopyEmails.push(ce); var bi=$("b_copy"); if(bi) bi.value=""; render(); return; }
     if(t.dataset.copyoff){ S.config.deskCopyEmails=(S.config.deskCopyEmails||[]).filter(function(x){ return x!==t.dataset.copyoff; }); render(); return; }
-    if(a==="savebrand"){ var body={name:val("br_name"),short:val("br_short"),productName:val("br_product"),tagline:val("br_tagline"),timeZone:val("br_tz"),primary:val("br_primary"),accent:val("br_accent")};
+    if(a==="apprificolors"){ var pc=$("br_primary"), ac=$("br_accent"); if(pc) pc.value="#12324f"; if(ac) ac.value="#d4652a"; toast("Apprifi colors restored. Save to apply."); return; }
+    if(a==="savebrand"){ var body={name:val("br_name"),short:val("br_short"),tagline:val("br_tagline"),supportLine:val("br_support"),timeZone:val("br_tz"),primary:val("br_primary"),accent:val("br_accent")};
       var lf=$("br_logo"); var pr=api("PUT","/api/brand",body);
       if(lf&&lf.files&&lf.files[0]){ var bfd=new FormData(); bfd.append("file",lf.files[0],lf.files[0].name); pr=pr.then(function(){ return api("POST","/api/brand/logo",bfd,true); }); }
-      pr.then(function(d){ applyBrand(d.brand); render(); toast("Branding saved."); }).catch(fail); return; }
+      pr.then(function(d){ applyBrand(d.brand); render(); toast("Lender identity saved."); }).catch(fail); return; }
     if(a==="savebank"){ var cc=S.config||CORE.defaultConfig(); api("PUT","/api/config",cc).then(function(d){ S.config=d.config; render(); toast("Bank settings saved."); }).catch(fail); return; }
     if(a==="saveperson"){ var pn=val("p_name"), pe=val("p_email"), pr=val("p_role"), pp=val("p_phone"); if(!pn||!pe){ toast("Name and email are required."); return; }
       api("POST","/api/users",{name:pn,email:pe,role:pr,phone:pp}).then(function(d){ modal(inviteLinkSheet(pn,pe,d.inviteLink,d.expiresDays,d.emailed)); return loadUsers(); }).then(render).catch(fail); return; }

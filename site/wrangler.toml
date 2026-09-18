@@ -1,0 +1,31 @@
+# apprifi.com: the public site. Static pages plus two small endpoints (request a walkthrough, sign-in router).
+name = "apprifi-site"
+main = "src/site.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+# The apex and www already have proxied DNS records; routes put this Worker in front of them.
+routes = [
+  { pattern = "apprifi.com/*", zone_name = "apprifi.com" },
+  { pattern = "www.apprifi.com/*", zone_name = "apprifi.com" }
+]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "404-page"
+run_worker_first = true   # every request passes through the Worker: www redirect, /demo, then assets
+
+[vars]
+VENDOR_EMAIL = "crescicharles@gmail.com"
+MAIL_FROM = "Apprifi <no-reply@apprifi.com>"
+SITE_URL = "https://apprifi.com"
+
+# Request-a-walkthrough mail goes out through the same Cloudflare Email Sending domain as the portals.
+[[send_email]]
+name = "EMAIL"
+
+# Rate limiting for the contact form. Create with: npx wrangler kv namespace create SITE
+[[kv_namespaces]]
+binding = "SITE"
+id = "b97ea582d90b487db090fcc49d2e9b8d"

@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-/* Stand up the Appraisal Desk for a new lender: its own Worker environment, database, document store,
-   hostname and branding, fully isolated from every other lender. Run from the repository on the deploying PC
-   after `npx wrangler login`.
+/* Stand up Apprifi for a new lender: its own Worker environment, database, document store, hostname and
+   identity, fully isolated from every other lender. Run from the repository on the deploying PC after
+   `npx wrangler login`.
 
    node lender.js new --slug prairie --name "Prairie Community Bank" --domain prairie.apprifi.com \
-        [--tagline "Pontiac and Fairbury"] [--tz America/Chicago] [--primary "#0b5d3b"] [--accent "#8a1c1c"]
+        [--tagline "Pontiac and Fairbury"] [--tz America/Chicago] [--primary "#0b5d3b"] [--accent "#8a1c1c"] \
+        [--email-domain prairiebank.com] [--type lender|firm|wealth]
    Then: node provision.js admin --env prairie --name "..." --email ...   (the lender's designated administrator)
+   And, once, in the Cloudflare dashboard under Email Routing for apprifi.com: a rule sending desk-prairie@apprifi.com
+   to the Worker appraisal-desk-prairie, so replies to notices land on the order.
+   --email-domain adds the lender to the public site's sign-in router (site/lenders.json) and redeploys the site.
    Later: node lender.js deploy --slug prairie   (after any code change)
 */
 import {readFileSync, writeFileSync, existsSync, appendFileSync} from "node:fs";
@@ -30,7 +34,7 @@ if (cmd !== "new") die("Usage: node lender.js new --slug x --name \"...\" --doma
 
 const name = String(opt("name") || "").trim(), domain = String(opt("domain") || "").trim().toLowerCase();
 if (!name || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) die("--name and a valid --domain are required.");
-const tz = opt("tz") || "America/Chicago", tagline = opt("tagline") || "", primary = opt("primary") || "#1f4984", accent = opt("accent") || "#790000";
+const tz = opt("tz") || "America/Chicago", tagline = opt("tagline") || "", primary = opt("primary") || "", accent = opt("accent") || "", emailDomain = String(opt("email-domain") || "").toLowerCase(), ctype = ["lender", "firm", "wealth"].includes(opt("type")) ? opt("type") : "lender";
 const toml = readFileSync("wrangler.toml", "utf8");
 if (toml.includes("[env." + slug + "]")) die("[env." + slug + "] already exists in wrangler.toml. Use: node lender.js deploy --slug " + slug);
 
@@ -39,6 +43,7 @@ const d1 = run("npx wrangler d1 create appraisal-desk-" + slug, true);
 const d1id = (/database_id\s*=\s*"([0-9a-f-]+)"/.exec(d1) || [])[1] || die("Could not read the D1 id:\n" + d1);
 const kv = run("npx wrangler kv namespace create FILES_" + slug.toUpperCase().replace(/-/g, "_"), true);
 const kvid = (/id\s*=\s*"([0-9a-f]+)"/.exec(kv) || [])[1] || die("Could not read the KV id:\n" + kv);
+run("npx wrangler r2 bucket create appraisal-desk-" + slug, true);
 const q = v => '"' + String(v).replace(/"/g, "'") + '"';
 const block = `
 # ---------------------------------------------------------------------------
@@ -60,9 +65,18 @@ run_worker_first = ["/api/*", "/f/*", "/brand/*"]
 PUBLIC_URL = ${q("https://" + domain)}
 LENDER_NAME = ${q(name)}
 LENDER_TAGLINE = ${q(tagline)}
-LENDER_PRIMARY = ${q(primary)}
-LENDER_ACCENT = ${q(accent)}
-TIMEZONE = ${q(tz)}
+CLIENT_TYPE = ${q(ctype)}
+${primary ? "LENDER_PRIMARY = " + q(primary) + "\n" : ""}${accent ? "LENDER_ACCENT = " + q(accent) + "\n" : ""}TIMEZONE = ${q(tz)}
+VENDOR_EMAIL = "crescicharles@gmail.com"
+MAIL_FROM = ${q(name + " via Apprifi <no-reply@apprifi.com>")}
+MAIL_INBOUND = ${q("desk-" + slug + "@apprifi.com")}
+
+[[env.${slug}.send_email]]
+name = "EMAIL"
+
+[[env.${slug}.r2_buckets]]
+binding = "BUCKET"
+bucket_name = "appraisal-desk-${slug}"
 
 [[env.${slug}.d1_databases]]
 binding = "DB"
@@ -86,5 +100,12 @@ const sr = spawnSync("npx", ["wrangler", "secret", "put", "AUTH_SECRET", "--env"
 if (sr.status !== 0) die("Could not set AUTH_SECRET:\n" + sr.stderr + sr.stdout);
 console.log("Deploying ...");
 run("node build.js", true); run("npx wrangler deploy --env " + slug, true);
+if (emailDomain) {
+  const lp = "site/lenders.json", list = existsSync(lp) ? JSON.parse(readFileSync(lp, "utf8")) : [];
+  if (!list.some(l => l.slug === slug)) list.push({slug, name, portal: "https://" + domain, domains: [emailDomain]});
+  writeFileSync(lp, JSON.stringify(list, null, 2) + "\n");
+  console.log("Added " + emailDomain + " to the public sign-in router; deploying the site ...");
+  run("npx wrangler deploy -c site/wrangler.toml", true);
+}
 console.log("\n" + name + " is live at https://" + domain + " (the certificate can take a few minutes).");
 console.log("Next: the lender names its administrator, then run\n  node provision.js admin --env " + slug + " --name \"Full Name\" --email person@lender.com\nand send them the printed link. The administrator uploads the logo under Lender branding.");

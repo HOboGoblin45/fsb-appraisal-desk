@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security and privacy at Apprifi</title>
+<meta name="description" content="How Apprifi protects lender, appraiser and borrower data: isolation per institution, access control, encryption, file handling, records and retention.">
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&family=PT+Serif:wght@400;700&display=swap">
+<link rel="stylesheet" href="/site.css">
+</head>
+<body>
+<header class="top">
+  <div class="topin">
+    <a href="/"><img class="logo" src="/apprifi-logo.svg" alt="Apprifi" width="152" height="40"></a>
+    <nav aria-label="Site"><a href="/">Home</a><a href="/sign-in">Sign in</a><a class="btn p s" href="/#request">Request a walkthrough</a></nav>
+  </div>
+</header>
+
+<main class="wrap prose" style="padding-block:48px 24px">
+  <p class="lbl">Security and privacy</p>
+  <h1 style="font-size:clamp(28px,3.4vw,38px);margin-top:8px">What we do with your data, and what we do not.</h1>
+  <p>Apprifi handles information a lender is accountable for: borrower and agent contact details, property addresses, loan references, sales contracts and appraisal reports. This page states plainly how that information is stored, who can reach it, and how it leaves the system. It describes the product as built; when something changes, this page changes with it.</p>
+
+  <h2>One institution, one portal</h2>
+  <p>Each lender runs on its own hostname (for example yourbank.apprifi.com) with its own database and its own document store. Nothing is shared between institutions: not users, not orders, not files, not settings. The vendor stands the portal up and issues one invitation to the administrator the lender names, and holds no account inside the portal afterwards. Re-issuing the administrator's invitation at the lender's request is the only thing the vendor can do without an account the lender grants.</p>
+
+  <h2>Who can see what</h2>
+  <ul>
+    <li>Roles are assigned by the lender's administrator when a person is invited. Nobody chooses their own role.</li>
+    <li>Loan officers are read only: status, and the finished report and invoice. They cannot place, edit or cancel orders, open working documents, or post on the conversation.</li>
+    <li>Appraisers see the orders the lender places and act only on the ones assigned to them.</li>
+    <li>Borrowers and agents never sign in. Each receives a personal link that opens one page for one order. It reaches nothing else, and the desk can reissue it at any time, which stops the old link working.</li>
+    <li>The finished report reaches the borrower only after the lender delivers it and the borrower agrees to electronic delivery on their page. Both events are logged.</li>
+  </ul>
+
+  <h2>Sign-in and sessions</h2>
+  <ul>
+    <li>Passwords are at least ten characters, salted, peppered with a server-side secret, and hashed with PBKDF2-SHA256 at 100,000 iterations. The portal never stores or emails a password.</li>
+    <li>Sessions are HttpOnly, SameSite cookies backed by the database, and expire after 14 days without activity. Changing or resetting a password signs out every other device. Suspending a person signs them out immediately.</li>
+    <li>Invitations and password-reset links work once; invitations expire in seven days and reset links in two hours.</li>
+    <li>Sign-in attempts are rate limited per address and per account. Every mutating request must originate from the portal itself.</li>
+  </ul>
+
+  <h2>Files</h2>
+  <ul>
+    <li>Uploads are limited to PDF, images, XML, CSV, Word, Excel and ZIP at 20 MB each. Each file's first bytes must match its extension; a renamed file is refused.</li>
+    <li>Files are stored under random keys and served only as attachments, in a browser sandbox, with content-type sniffing disabled, so nothing uploaded can run in a browser.</li>
+    <li>Staff downloads of the other side's documents, and every borrower download, are written to the order's record.</li>
+    <li>Removing a document hides it from the order but keeps the bytes, so the record stays complete.</li>
+  </ul>
+
+  <h2>Messages</h2>
+  <ul>
+    <li>Email goes out through Cloudflare Email Service from an Apprifi address authenticated with SPF, DKIM and DMARC, in the lender's name. Replies come back to the order.</li>
+    <li>Text messages go through Twilio. Incoming texts and delivery reports are accepted only with a valid Twilio signature. A reply of STOP records an opt-out and later texts to that number are held.</li>
+    <li>Every message the portal composes is visible to the lender in the Outbox with its delivery state.</li>
+  </ul>
+
+  <h2>The record</h2>
+  <p>Every order carries an append-only record: who ordered it and under what role, the recusal attestation, each status change, message, document, conversation entry and download, timestamped by the server. It exports as a text file. The administrator also has an administration record of every access change. Neither can be edited from the portal.</p>
+
+  <h2>Where it runs</h2>
+  <p>Apprifi runs on Cloudflare's platform: Workers for the application, D1 for the database, R2 for documents. Traffic is encrypted in transit with TLS; Cloudflare encrypts stored data at rest. The database can be restored to any point in the preceding thirty days, and a full export can be taken at any time and kept with the lender's records. Third parties that process data on the portal's behalf are Cloudflare (hosting, database, storage, email delivery) and Twilio (text messaging).</p>
+
+  <h2>Retention and ownership</h2>
+  <p>The data in a lender's portal belongs to the lender. It is kept for as long as the lender subscribes and is exported to the lender, then deleted, when the relationship ends. The vendor does not use lender, appraiser or borrower data for any purpose other than operating the lender's portal, and does not sell or share it.</p>
+
+  <h2>This website</h2>
+  <p>apprifi.com sets no cookies and runs no analytics or advertising scripts. The walkthrough request form sends what you type to the vendor's inbox and nowhere else, and records your connection address only to limit abuse.</p>
+
+  <h2>Reporting a concern</h2>
+  <p>Write to <a href="mailto:orders@apprifi.com">orders@apprifi.com</a>, which reaches the vendor directly. Security reports are acknowledged within one business day.</p>
+  <p class="sm muted" style="margin-top:28px">Last reviewed 18 September 2026.</p>
+</main>
+
+<footer>
+  <div class="wrap row">
+    <div>Cresci Appraisal &amp; Consulting Company, Bloomington-Normal, Illinois. <a href="/#request" style="margin:0">Request a walkthrough</a></div>
+    <div><a href="/">Home</a><a href="/sign-in">Sign in</a><a href="https://demo.apprifi.com" rel="noopener">Live demo</a></div>
+  </div>
+</footer>
+</body>
+</html>

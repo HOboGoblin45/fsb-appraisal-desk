@@ -17,6 +17,34 @@ var CORE = (function(){
     officer:{name:"Loan officer",hint:"Read only. Sees status, downloads the finished report. Cannot touch the order, which keeps the independence record clean."},
     appraiser:{name:"Appraiser",hint:"Accepts, schedules, inspects, delivers the report and invoice, sets availability."}
   };
+  /* Who the client is. Lenders need the recusal attestation and lending vocabulary; estate attorneys and wealth
+     managers order the same appraisals for estates, trusts, gifting and planning, with their own titles and no
+     credit decision to recuse from. The four roles keep their keys; only their names, hints and wording change. */
+  var CLIENT_TYPES = {
+    lender:{key:"lender",word:"lender",staff:"loan officer",refLabel:"Loan number",refHint:"2026-004417",attest:true,
+      roles:{admin:["Lender admin","Manages who can sign in and what they may do. Sees every order. Does not place orders."],
+             desk:["Appraisal desk","Loan officer assistant. Places, edits and cancels orders, uploads documents, sends questions."],
+             officer:["Loan officer","Read only. Sees status, downloads the finished report. Cannot touch the order, which keeps the independence record clean."]},
+      deliveredLabel:"Report delivered to your lender",recordName:"independence record",recordTitle:"APPRAISER INDEPENDENCE RECORD"},
+    firm:{key:"firm",word:"attorney's office",staff:"attorney",refLabel:"Matter or file number",refHint:"2026-EST-0117",attest:false,
+      roles:{admin:["Firm administrator","Manages who can sign in and what they may do. Sees every matter. Does not place orders."],
+             desk:["Paralegal","Places, edits and cancels orders, uploads documents, keeps the appraiser supplied with what they need."],
+             officer:["Attorney","Read only. Sees the status of every appraisal the firm has ordered and downloads the finished report."]},
+      deliveredLabel:"Report delivered to your attorney",recordName:"order record",recordTitle:"APPRAISAL ORDER RECORD"},
+    wealth:{key:"wealth",word:"advisor's office",staff:"advisor",refLabel:"Client or account reference",refHint:"Trust 2026-044",attest:false,
+      roles:{admin:["Firm administrator","Manages who can sign in and what they may do. Sees every order. Does not place orders."],
+             desk:["Coordinator","Places, edits and cancels orders, uploads documents, keeps the appraiser supplied with what they need."],
+             officer:["Advisor","Read only. Sees the status of every appraisal ordered for a client and downloads the finished report."]},
+      deliveredLabel:"Report delivered to your advisor",recordName:"order record",recordTitle:"APPRAISAL ORDER RECORD"}
+  };
+  var CT = CLIENT_TYPES.lender;
+  function setClientType(t){
+    CT = CLIENT_TYPES[t] || CLIENT_TYPES.lender;
+    ["admin","desk","officer"].forEach(function(k){ ROLES[k].name = CT.roles[k][0]; ROLES[k].hint = CT.roles[k][1]; });
+    CLIENT_LABEL.Delivered = CT.deliveredLabel;
+    return CT;
+  }
+  function clientType(){ return CT; }
   /* product catalogue: name, whether an XML (MISMO/UAD) file is normally required, and what the appraiser needs before starting */
   var PRODUCTS = [
     {name:"1004 URAR",xml:true,needs:"Sales contract for purchases."},
@@ -39,7 +67,7 @@ var CORE = (function(){
     {name:"Updated appraisal (as is)",xml:false,needs:"Original report."}
   ];
   var REPORT_TYPES = PRODUCTS.map(function(p){ return p.name; });
-  var PURPOSES = ["Purchase","Refinance","Construction","Purchase and improvement","Home equity","Additional collateral","Estate","Other"];
+  var PURPOSES = ["Purchase","Refinance","Construction","Purchase and improvement","Home equity","Additional collateral","Estate","Trust or gift","Divorce or partition","Tax appeal","Other"];
   var LOAN_TYPES = ["Conventional","Portfolio / in-house","FHA","VA","USDA-RD","Construction","Commercial","HELOC","Not a loan"];
   var PREMISES = ["As is","As completed (subject to plans and specs)","As improved (subject to listed repairs)","Final inspection only","Updated appraisal","Retrospective (date of death)"];
   var OCCUPANCY = ["Owner occupied","Tenant occupied","Vacant","Seller occupied","Under construction"];
@@ -148,7 +176,7 @@ var CORE = (function(){
     if(n&&p) return n+", "+p+"."; if(n) return n+"."; if(p) return "Your appraiser, "+p+"."; return lenderName(cfg)+"."; }
   function qLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?(" Questions: "+p+"."):""; }
   function assignedLine(cfg){ var n=apr(cfg); return n?(" "+n+" is your appraiser."):""; }
-  function contactLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?("Questions? Call "+aprLower(cfg)+" at "+p+"."):("Questions? Contact your loan officer at "+lenderName(cfg)+"."); }
+  function contactLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?("Questions? Call "+aprLower(cfg)+" at "+p+"."):("Questions? Contact your "+CT.staff+" at "+lenderName(cfg)+"."); }
   function money(n){ n=Number(n)||0; return "$"+n.toLocaleString("en-US"); }
 
   /* who gets what. Each message: {channel:"email"|"sms", party:"borrower"|"agent"|"desk"|"appraiser"|"officer", subject, body}
@@ -199,7 +227,7 @@ var CORE = (function(){
     delivered:function(o,c){ var m=[
       {channel:"email",party:"desk",subject:"Appraisal delivered: "+o.addr,body:"The appraisal report for "+o.addr+" has been delivered through the portal and is available to download. [portal]"},
       {channel:"email",party:"borrower",subject:"Your appraisal copy: "+o.addr,
-       body:"A copy of the appraisal for "+o.addr+" is available to you at no charge: [link]. You are receiving this electronically because you agreed to electronic delivery. To receive a paper copy instead at no charge, reply to this message or call your loan officer at "+lenderName(c)+"."}
+       body:"A copy of the appraisal for "+o.addr+" is available to you at no charge: [link]. You are receiving this electronically because you agreed to electronic delivery. To receive a paper copy instead at no charge, reply to this message or call your "+CT.staff+" at "+lenderName(c)+"."}
     ]; if(o.officerName) m.push({channel:"email",party:"officer",subject:"Appraisal delivered: "+o.addr,body:"The report for "+o.addr+" is in the portal. [portal]"}); return m; },
     invoiced:function(o,c){ return [
       {channel:"email",party:"desk",subject:"Invoice: "+o.addr,body:"The invoice for the appraisal at "+o.addr+(o.fee?(" in the amount of "+money(o.fee)):"")+" is in the portal. "+aprSig(c)+" [portal]"}
@@ -423,7 +451,7 @@ var CORE = (function(){
            the client posts from their status page. Every entry is logged on the independence record. */
         var to=p.to==="client"?"client":"staff";
         if(role==="client"){ to="staff"; }
-        else if(!can(role,"post")) fail("forbidden","Loan officers read the conversation but do not take part, which keeps the independence record clean.");
+        else if(!can(role,"post")) fail("forbidden",ROLES.officer.name+"s read the conversation but do not take part; route anything through the "+ROLES.desk.name.toLowerCase()+".");
         if(to==="client"&&!can(role,"postclient")) fail("forbidden","Only the desk or the appraiser messages the client.");
         if(to==="client"&&!o.clientContacted) fail("stale","The client has not been contacted yet; the appraiser accepts the order first.");
         var text=String(p.text||"").trim().slice(0,2000);
@@ -505,7 +533,7 @@ var CORE = (function(){
     return due.filter(function(k){ return nowMs-last(k)>24*H; });
   }
 
-  return {STEPS:STEPS,CLIENT_LABEL:CLIENT_LABEL,ROLES:ROLES,PRODUCTS:PRODUCTS,REPORT_TYPES:REPORT_TYPES,PURPOSES:PURPOSES,ACCESS:ACCESS,
+  return {STEPS:STEPS,CLIENT_LABEL:CLIENT_LABEL,ROLES:ROLES,CLIENT_TYPES:CLIENT_TYPES,setClientType:setClientType,clientType:clientType,PRODUCTS:PRODUCTS,REPORT_TYPES:REPORT_TYPES,PURPOSES:PURPOSES,ACCESS:ACCESS,
     LOAN_TYPES:LOAN_TYPES,PREMISES:PREMISES,OCCUPANCY:OCCUPANCY,PROPERTY_TYPES:PROPERTY_TYPES,DELIVERY_FORMATS:DELIVERY_FORMATS,REVISION_KINDS:REVISION_KINDS,PAY_METHODS:PAY_METHODS,
     lenderName:lenderName,nudgesDue:nudgesDue,
     DOC_KINDS:DOC_KINDS,HOLD_REASONS:HOLD_REASONS,DECLINE_REASONS:DECLINE_REASONS,CANCEL_REASONS:CANCEL_REASONS,PERM:PERM,can:can,

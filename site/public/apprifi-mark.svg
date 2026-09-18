@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40" role="img" aria-label="Apprifi">
+  <rect x="1" y="1" width="38" height="38" rx="9" fill="#12324f"/>
+  <path d="M20 8.5 8.5 20.5h4.2V31h14.6V20.5h4.2Z" fill="#ffffff"/>
+  <rect x="17.4" y="23.6" width="5.2" height="7.4" rx="1" fill="#d4652a"/>
+  <path d="M12.7 20.5h14.6" stroke="#12324f" stroke-width="1.6"/>
+</svg>

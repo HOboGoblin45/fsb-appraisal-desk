@@ -21,10 +21,9 @@ PUBLIC_URL = "https://fsb.apprifi.com"
 LENDER_NAME = "First Security Bank"
 LENDER_SHORT = "FSB"
 LENDER_TAGLINE = "Mackinaw, Heritage Lake, Deer Creek, Danvers"
-LENDER_LOGO = "fsb-logo.png"
 TIMEZONE = "America/Chicago"
 VENDOR_EMAIL = "crescicharles@gmail.com"
-MAIL_FROM = "First Security Bank Appraisal Desk <no-reply@apprifi.com>"
+MAIL_FROM = "First Security Bank via Apprifi <no-reply@apprifi.com>"
 # MAIL_REPLY_TO = "someone@fsb1.com"
 MAIL_INBOUND = "desk@apprifi.com"   # Email Routing sends desk@apprifi.com (subaddressing on) to this Worker
 
@@ -62,13 +61,16 @@ crons = ["*/5 * * * *"]
 # (incoming messages) and /api/hooks/twilio/status (delivery reports), both signature-checked.
 
 # ---------------------------------------------------------------------------
-# Demonstration copy at https://fsbdemo.apprifi.com: same code, its own database and storage,
-# sample people and orders, nothing sent, reset nightly. Deploy with: npx wrangler deploy --env demo
+# Demonstration copies: same code, one shared demonstration database and store, sample people and
+# orders, nothing sent, reset nightly. Two hostnames read the same data under different lender names:
+#   demo.apprifi.com     "Prairie Community Bank" (fictional), linked from the public site
+#   fsbdemo.apprifi.com  the copy shown to First Security Bank
+# Deploy with: npx wrangler deploy --env demo   and   npx wrangler deploy --env fsbdemo
 [env.demo]
-name = "fsb-appraisal-desk-demo"
+name = "apprifi-demo"
 workers_dev = false
 routes = [
-  { pattern = "fsbdemo.apprifi.com", custom_domain = true }
+  { pattern = "demo.apprifi.com", custom_domain = true }
 ]
 
 [env.demo.assets]
@@ -78,11 +80,10 @@ not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/f/*", "/brand/*"]
 
 [env.demo.vars]
-PUBLIC_URL = "https://fsbdemo.apprifi.com"
-LENDER_NAME = "First Security Bank"
-LENDER_SHORT = "FSB"
-LENDER_TAGLINE = "Mackinaw, Heritage Lake, Deer Creek, Danvers"
-LENDER_LOGO = "fsb-logo.png"
+PUBLIC_URL = "https://demo.apprifi.com"
+LENDER_NAME = "Prairie Community Bank"
+LENDER_SHORT = "PCB"
+LENDER_TAGLINE = "Pontiac, Fairbury and Chenoa"
 TIMEZONE = "America/Chicago"
 DEMO = "1"
 PBKDF2_ITER = "1000"
@@ -99,3 +100,38 @@ id = "1702a8c6c5f84468928894317b427623"
 
 [env.demo.triggers]
 crons = ["0 8 * * *"]
+
+[env.fsbdemo]
+name = "fsb-appraisal-desk-demo"
+workers_dev = false
+routes = [
+  { pattern = "fsbdemo.apprifi.com", custom_domain = true }
+]
+
+[env.fsbdemo.assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/f/*", "/brand/*"]
+
+[env.fsbdemo.vars]
+PUBLIC_URL = "https://fsbdemo.apprifi.com"
+LENDER_NAME = "First Security Bank"
+LENDER_SHORT = "FSB"
+LENDER_TAGLINE = "Mackinaw, Heritage Lake, Deer Creek, Danvers"
+TIMEZONE = "America/Chicago"
+DEMO = "1"
+PBKDF2_ITER = "1000"
+
+[[env.fsbdemo.d1_databases]]
+binding = "DB"
+database_name = "fsb-portal-demo"
+database_id = "a438ae7f-9794-418f-b2b6-baab86b168ab"
+migrations_dir = "migrations"
+
+[[env.fsbdemo.kv_namespaces]]
+binding = "FILES"
+id = "1702a8c6c5f84468928894317b427623"
+
+[env.fsbdemo.triggers]
+crons = []   # the demo env's nightly reset covers the shared database

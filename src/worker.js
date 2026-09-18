@@ -7,6 +7,8 @@ import {resetDemo} from "./demo.js";
 import PostalMime from "postal-mime";
 
 const COOKIE = "fsb_session";
+/* The product identity. Lenders are shown as the client beside it and may add their own logo and colors. */
+const APPRIFI = {product: "Apprifi", primary: "#12324f", accent: "#d4652a", site: "https://apprifi.com"};
 const SESSION_DAYS = 14;
 const INVITE_DAYS = 7;
 const MAX_FILE = 20 * 1024 * 1024;
@@ -78,8 +80,10 @@ async function limited(env, key, max, windowMs) {
 
 /* ---------- brand (white label) ---------- */
 function defaultBrand(env) {
-  return {name: env.LENDER_NAME || "Your Lender", short: env.LENDER_SHORT || "", tagline: env.LENDER_TAGLINE || "", primary: env.LENDER_PRIMARY || "#1f4984",
-    accent: env.LENDER_ACCENT || "#790000", timeZone: env.TIMEZONE || CORE.TZ, logo: env.LENDER_LOGO ? "/" + env.LENDER_LOGO : "", supportLine: "", productName: "Appraisal Desk"};
+  // Apprifi is the product; the lender is the client shown beside it. A lender may add its own logo and colors.
+  return {name: env.LENDER_NAME || "Your Lender", short: env.LENDER_SHORT || "", tagline: env.LENDER_TAGLINE || "", primary: env.LENDER_PRIMARY || APPRIFI.primary,
+    accent: env.LENDER_ACCENT || APPRIFI.accent, timeZone: env.TIMEZONE || CORE.TZ, logo: env.LENDER_LOGO ? "/" + env.LENDER_LOGO : "", supportLine: "", productName: APPRIFI.product,
+    site: APPRIFI.site};
 }
 async function loadBrand(env) {
   const b = defaultBrand(env);
@@ -95,7 +99,7 @@ function cleanBrand(input, prev) {
   if (input.short !== undefined) b.short = s(input.short, 20);
   if (input.tagline !== undefined) b.tagline = s(input.tagline, 160);
   if (input.supportLine !== undefined) b.supportLine = s(input.supportLine, 200);
-  if (input.productName !== undefined) b.productName = s(input.productName, 40) || "Appraisal Desk";
+  if (input.productName !== undefined) b.productName = s(input.productName, 40) || APPRIFI.product;
   if (hex(input.primary)) b.primary = hex(input.primary);
   if (hex(input.accent)) b.accent = hex(input.accent);
   if (input.timeZone !== undefined) { try { new Intl.DateTimeFormat("en-US", {timeZone: String(input.timeZone)}); b.timeZone = String(input.timeZone); } catch (e) { throw bad("Unknown time zone."); } }
@@ -237,7 +241,7 @@ async function queueMessages(env, base, o, msgs, at) {
       targets = [{name: o.orderedBy || "Appraisal desk", email: o.orderedByEmail, phone: ""}];
       (cfg.deskCopyEmails || []).forEach(e => { if (e && e !== (o.orderedByEmail || "").toLowerCase()) targets.push({name: "Appraisal desk", email: e, phone: ""}); });
     }
-    else if (m.party === "officer") targets = [{name: o.officerName || "Loan officer", email: o.officerEmail, phone: ""}];
+    else if (m.party === "officer") targets = [{name: o.officerName || CORE.ROLES.officer.name, email: o.officerEmail, phone: ""}];
     else if (m.party === "appraiser") targets = appraisers.length ? appraisers : [{name: cfg.appraiserName || "Appraiser", email: cfg.appraiserEmail, phone: cfg.appraiserPhone}];
     for (const t of targets) {
       const addr = m.channel === "sms" ? s(t.phone, 40) : s(t.email, 120).toLowerCase();
@@ -300,7 +304,8 @@ async function createOrder(env, base, ctx, b, user, at) {
   at = at || nowISO();
   const role = user.role;
   const addr = s(b.addr, 200); if (!addr) throw bad("A property address is required.");
-  if (!b.attestation) throw bad("The recusal attestation is required before an order can be placed.");
+  const attest = CORE.clientType().attest;
+  if (attest && !b.attestation) throw bad("The recusal attestation is required before an order can be placed.");
   const o = {
     addr, city: s(b.city, 120), loan: s(b.loan, 60), type: CORE.REPORT_TYPES.includes(b.type) ? b.type : CORE.REPORT_TYPES[0],
     purpose: CORE.PURPOSES.includes(b.purpose) ? b.purpose : "Purchase", due: /^\d{4}-\d{2}-\d{2}$/.test(s(b.due, 10)) ? s(b.due, 10) : "",
@@ -315,12 +320,12 @@ async function createOrder(env, base, ctx, b, user, at) {
     deliveryFormat: CORE.DELIVERY_FORMATS.includes(b.deliveryFormat) ? b.deliveryFormat : "PDF", refNo: s(b.refNo, 60), groupRef: s(b.groupRef, 60), combinedReport: !!b.combinedReport,
     intendedUse: s(b.intendedUse, 1000), assignedTo: "", assignedName: "",
     step: 0, hold: false, holdReason: "", declined: false, cancelled: false, clientContacted: false,
-    orderedBy: user.name, orderedByRole: CORE.ROLES[role].name, orderedByEmail: user.email, orderedById: user.id, orderedAt: at, attestation: true,
+    orderedBy: user.name, orderedByRole: CORE.ROLES[role].name, orderedByEmail: user.email, orderedById: user.id, orderedAt: at, attestation: attest,
     createdAt: at, updatedAt: at
   };
   if (o.borrowerEmail && !emailOk(o.borrowerEmail)) throw bad("The borrower email does not look right.");
   if (o.agentEmail && !emailOk(o.agentEmail)) throw bad("The agent email does not look right.");
-  if (o.officerEmail && !emailOk(o.officerEmail)) throw bad("The loan officer email does not look right.");
+  if (o.officerEmail && !emailOk(o.officerEmail)) throw bad("The " + CORE.ROLES.officer.name.toLowerCase() + " email does not look right.");
   if (o.purpose === "Purchase" && !o.due && o.closingDate) o.due = o.closingDate;
   if (b.assignedTo) { const u = await env.DB.prepare("SELECT id,name FROM users WHERE id=? AND role='appraiser' AND active=1").bind(String(b.assignedTo)).first(); if (!u) throw bad("That appraiser is not active."); o.assignedTo = u.id; o.assignedName = u.name; }
   else { const only = (await env.DB.prepare("SELECT id,name FROM users WHERE role='appraiser' AND active=1").all()).results || []; if (only.length === 1) { o.assignedTo = only[0].id; o.assignedName = only[0].name; } }
@@ -329,7 +334,7 @@ async function createOrder(env, base, ctx, b, user, at) {
   const data = {...o}; delete data.createdAt; delete data.updatedAt;
   await env.DB.prepare("INSERT INTO orders (id,version,step,hold,declined,cancelled,tok_b,tok_a,appt_start,created_at,updated_at,assigned_to,data) VALUES (?,1,0,0,0,0,?,?,NULL,?,?,?,?)").bind(id, tokB, tokA, o.createdAt, o.updatedAt, o.assignedTo || "", JSON.stringify(data)).run();
   o.id = id; o.tokB = tokB; o.tokA = tokA; o.version = 1;
-  await writeEvents(env, id, [{at, who: user.name, role, what: "Order created. Recusal attestation recorded."}]);
+  await writeEvents(env, id, [{at, who: user.name, role, what: attest ? "Order created. Recusal attestation recorded." : "Order created."}]);
   const msgs = CORE.templates.created(o, cfg).map(m => ({...m, template: "created"}));
   const queued = await queueMessages(env, base, o, msgs, at);
   if (ctx && queued.some(q => q.status === "queued")) ctx.waitUntil(dispatch(env, 8));
@@ -352,15 +357,16 @@ async function runNudges(env, base) {
    has a transactional mail relay that accepts JSON). SMS goes through Twilio (account SID + auth token +
    either a messaging service SID or a from number). Nothing is sent in the demonstration copy. */
 function providers(env) {
-  const emailVia = env.EMAIL ? "cloudflare" : (env.RESEND_API_KEY ? "resend" : (env.MAIL_HOOK_URL ? "hook" : ""));
+  // MAIL_HOOK_URL is an explicit override (a lender's own relay, or the test sink); otherwise the Cloudflare binding, then Resend
+  const emailVia = env.MAIL_DISABLED === "1" ? "" : (env.MAIL_HOOK_URL ? "hook" : (env.EMAIL ? "cloudflare" : (env.RESEND_API_KEY ? "resend" : "")));
   const smsOn = !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_MESSAGING_SERVICE_SID || env.TWILIO_FROM));
   return {email: !!emailVia, emailVia, sms: smsOn, smsVia: smsOn ? "twilio" : "", inboundEmail: !!env.MAIL_INBOUND};
 }
 function mailHost(env) { return (env.PUBLIC_URL || "https://example.com").replace(/^https?:\/\//, "").replace(/[:/].*$/, ""); }
-function mailFrom(env, lender) { return env.MAIL_FROM || (lender + " Appraisal Desk <no-reply@" + mailHost(env) + ">"); }
+function mailFrom(env, lender) { return env.MAIL_FROM || (lender + " via Apprifi <no-reply@" + mailHost(env) + ">"); }
 /* Replies to a notice about an order come back to desk+<orderId>@<domain> when inbound routing is on. */
 function replyTo(env, lender, orderId) {
-  if (env.MAIL_INBOUND && orderId) { const [local, domain] = String(env.MAIL_INBOUND).split("@"); if (local && domain) return lender + " Appraisal Desk <" + local + "+" + orderId + "@" + domain + ">"; }
+  if (env.MAIL_INBOUND && orderId) { const [local, domain] = String(env.MAIL_INBOUND).split("@"); if (local && domain) return lender + " via Apprifi <" + local + "+" + orderId + "@" + domain + ">"; }
   return env.MAIL_REPLY_TO || undefined;
 }
 const escHtml = t => String(t).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -373,11 +379,13 @@ function renderEmail(brand, m) {
     escHtml(p).replace(/\n/g, "<br>").replace(urlRe, u => "<a href=\"" + escHtml(u) + "\" style=\"color:" + primary + "\">" + escHtml(u) + "</a>") + "</p>").join("");
   const button = first ? "<p style=\"margin:6px 0 20px\"><a href=\"" + escHtml(first) + "\" style=\"display:inline-block;background:" + primary + ";color:#ffffff;text-decoration:none;font:600 15px -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:11px 18px;border-radius:6px\">Open</a></p>" : "";
   const foot = escHtml(brand.name) + (brand.tagline ? " &middot; " + escHtml(brand.tagline) : "") + (brand.supportLine ? "<br>" + escHtml(brand.supportLine) : "") +
-    "<br>Sent by the " + escHtml(brand.productName || "Appraisal Desk") + " portal. Links in this message are personal to you; please do not forward them.";
+    "<br>Sent by " + escHtml(brand.productName || APPRIFI.product) + " on behalf of " + escHtml(brand.name) + ". Links in this message are personal to you; please do not forward them.";
   const html = "<!doctype html><html><body style=\"margin:0;background:#f3f5f8;padding:24px 12px\">" +
     "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td align=\"center\">" +
     "<table role=\"presentation\" width=\"600\" style=\"max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden\" cellspacing=\"0\" cellpadding=\"0\">" +
-    "<tr><td style=\"background:" + primary + ";padding:16px 24px;font:700 17px -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#ffffff\">" + escHtml(brand.name) + "</td></tr>" +
+    "<tr><td style=\"background:" + primary + ";padding:14px 24px\"><table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr>" +
+    "<td style=\"font:700 19px Georgia,'Times New Roman',serif;color:#ffffff;letter-spacing:-.01em\">" + escHtml(brand.productName || APPRIFI.product) + "</td>" +
+    "<td align=\"right\" style=\"font:600 13px -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#ffffff;opacity:.92\">" + escHtml(brand.name) + "</td></tr></table></td></tr>" +
     "<tr><td style=\"padding:24px 24px 10px\">" + paras + button + "</td></tr>" +
     "<tr><td style=\"padding:14px 24px 22px;font:12px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#6b7482;border-top:1px solid #e6e9ee\">" + foot + "</td></tr>" +
     "</table></td></tr></table></body></html>";
@@ -389,12 +397,12 @@ async function sendEmail(env, m) {
   const {text, html} = renderEmail(brand, m);
   const reply = replyTo(env, lender, m.order_id);
   const to = m.to_name ? {email: m.to_addr, name: m.to_name} : m.to_addr;
-  if (env.EMAIL) {
+  if (env.EMAIL && !env.MAIL_HOOK_URL) {
     // Cloudflare Email Service binding: the sending domain is onboarded in the same account, no key to manage
     const r = await env.EMAIL.send({to, from, subject, text, html, replyTo: reply, headers: m.id ? {"X-Appraisal-Desk-Message": String(m.id)} : undefined});
     return (r && r.messageId) || "";
   }
-  if (env.RESEND_API_KEY) {
+  if (env.RESEND_API_KEY && !env.MAIL_HOOK_URL) {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST", headers: {"authorization": "Bearer " + env.RESEND_API_KEY, "content-type": "application/json"},
       body: JSON.stringify({from, to: [m.to_addr], subject, text, html, reply_to: reply})
@@ -464,8 +472,8 @@ async function queueSystemMail(env, ctx, m) {
 async function inviteMail(env, ctx, req, target, by, link) {
   const brand = await loadBrand(env), roleName = (CORE.ROLES[target.role] || {}).name || target.role;
   return queueSystemMail(env, ctx, {to_name: target.name, to_addr: target.email, template: "invite",
-    subject: "Your " + brand.name + " Appraisal Desk sign-in",
-    body: by.name + " has added you to the " + brand.name + " Appraisal Desk as " + roleName + ". Choose your password and sign in here within " + INVITE_DAYS + " days: " + link +
+    subject: "Your Apprifi sign-in for " + brand.name,
+    body: by.name + " has added you to Apprifi for " + brand.name + " as " + roleName + ". Choose your password and sign in here within " + INVITE_DAYS + " days: " + link +
       "\n\nThe link works once. If it expires, ask " + by.name + " for a new one." + (brand.supportLine ? "\n\n" + brand.supportLine : "")});
 }
 /* Twilio signs every webhook: HMAC-SHA1 over the exact URL plus the sorted POST fields, base64. */
@@ -590,10 +598,11 @@ function contentDisposition(name) {
 /* ---------- independence log ---------- */
 function logText(o, cfg) {
   const L = [];
-  L.push("APPRAISER INDEPENDENCE RECORD"); L.push("");
-  L.push("Property: " + o.addr + ", " + o.city); L.push("Order: " + o.id); L.push("Loan number: " + (o.loan || "not provided"));
+  const CT = CORE.clientType();
+  L.push(CT.recordTitle); L.push("");
+  L.push("Property: " + o.addr + ", " + o.city); L.push("Order: " + o.id); L.push(CT.refLabel + ": " + (o.loan || "not provided"));
   L.push("Product: " + o.type + ", " + o.purpose + (o.loanType ? ", " + o.loanType : "") + (o.premise ? ", " + o.premise : "")); L.push("Client: " + cfg.lenderName + (cfg.brand && cfg.brand.tagline ? ", " + cfg.brand.tagline : ""));
-  if (o.refNo || o.pins) L.push("Lender reference: " + (o.refNo || "n/a") + "; parcels: " + (o.pins || "n/a"));
+  if (o.refNo || o.pins) L.push("Client reference: " + (o.refNo || "n/a") + "; parcels: " + (o.pins || "n/a"));
   if (o.assignedName) L.push("Assigned appraiser: " + o.assignedName);
   if (o.etaDate) L.push("Committed delivery date: " + o.etaDate);
   if (o.review) L.push("Reviewer: " + (o.review.name || "") + " (" + o.review.status + (o.review.signedAt ? ", signed " + o.review.signedAt : "") + ")");
@@ -601,14 +610,17 @@ function logText(o, cfg) {
   if (o.revision) L.push("Revisions: " + o.revision.n + " (" + o.revision.kind + ")");
   if (o.paid) L.push("Payment: " + o.paid.amount + " by " + o.paid.method + (o.paid.ref ? " ref " + o.paid.ref : "") + " on " + o.paid.at);
   L.push("Appraiser: " + (o.appraiserName || cfg.appraiserName || "not recorded")); L.push("Status: " + CORE.statusOf(o)); L.push("Exported: " + new Date().toISOString()); L.push("");
-  L.push("ORDERING AND RECUSAL");
+  L.push(CT.attest ? "ORDERING AND RECUSAL" : "ORDERING");
   L.push("Ordered by: " + o.orderedBy + " (" + o.orderedByRole + ", " + (o.orderedByEmail || "") + ")"); L.push("Ordered at: " + o.orderedAt);
-  L.push("Loan officer on file: " + (o.officerName || "not recorded"));
-  L.push("Recusal attestation: " + (o.attestation ? "RECORDED" : "NOT RECORDED"));
-  L.push('Attested text: "I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction."');
-  L.push("Control reference: 12 CFR 1026.42(d)(3)(ii); Interagency Appraisal and Evaluation Guidelines, 2010."); L.push("");
-  L.push("Engagement: direct between the lender (client) and the appraiser. No appraisal management company is involved. This portal is a communication and record-keeping tool operated for the lender; it does not select the appraiser, set or collect the fee, or review the report.");
-  L.push("Identities in this record are authenticated portal accounts (email and password) with roles assigned by the lender's administrator."); L.push("");
+  L.push(CORE.ROLES.officer.name + " on file: " + (o.officerName || "not recorded"));
+  if (CT.attest) {
+    L.push("Recusal attestation: " + (o.attestation ? "RECORDED" : "NOT RECORDED"));
+    L.push('Attested text: "I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction."');
+    L.push("Control reference: 12 CFR 1026.42(d)(3)(ii); Interagency Appraisal and Evaluation Guidelines, 2010.");
+  }
+  L.push("");
+  L.push("Engagement: direct between " + cfg.lenderName + " (client) and the appraiser. No appraisal management company is involved. Apprifi is a communication and record-keeping tool operated for the client; it does not select the appraiser, set or collect the fee, or review the report.");
+  L.push("Identities in this record are authenticated portal accounts (email and password) with roles assigned by the client's administrator."); L.push("");
   L.push("DOCUMENTS");
   (o.docs || []).forEach(d => L.push("  " + d.uploaded_at + "  " + d.name + "  (" + d.size + " bytes, " + d.kind + ")  uploaded by " + d.uploaded_by + " (" + d.uploaded_role + ")"));
   if (!(o.docs || []).length) L.push("  none"); L.push("");
@@ -617,13 +629,13 @@ function logText(o, cfg) {
   L.push("MESSAGES");
   (o.messages || []).forEach(m => { L.push("  " + m.created_at + "  " + m.channel.toUpperCase() + " to " + m.to_name + (m.to_addr ? " <" + m.to_addr + ">" : "") + "  [" + m.status + (m.sent_at ? " " + m.sent_at : "") + "]" + (m.subject ? "  subject: " + m.subject : "")); L.push("      " + m.body.replace(/\n/g, "\n      ")); });
   if (!(o.messages || []).length) L.push("  none"); L.push("");
-  L.push("Generated by the " + cfg.lenderName + " Appraisal Desk portal.");
+  L.push("Generated by Apprifi for " + cfg.lenderName + ".");
   return L.join("\n");
 }
 function icsFor(o, cfg) {
   const dt = iso => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
   const esc = t => String(t || "").replace(/\\/g, "\\\\").replace(/;/g, "\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
-  return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//" + esc(cfg.lenderName) + "//Appraisal Desk//EN", "METHOD:PUBLISH", "BEGIN:VEVENT",
+  return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Apprifi//" + esc(cfg.lenderName) + "//EN", "METHOD:PUBLISH", "BEGIN:VEVENT",
     "UID:" + o.id + "@appraisal-desk", "DTSTAMP:" + dt(nowISO()), "DTSTART:" + dt(o.apptStart), "DTEND:" + dt(o.apptEnd || (Date.parse(o.apptStart) + 3600e3)),
     "SUMMARY:" + esc("Appraisal inspection: " + o.addr), "LOCATION:" + esc(o.addr + ", " + o.city),
     "DESCRIPTION:" + esc(CORE.aprCap(cfg) + " will need access to every room, the basement and the garage. " + CORE.contactLine(cfg)),
@@ -662,8 +674,8 @@ async function api(req, env, ctx) {
         env.DB.prepare("INSERT INTO invites (code_hash,user_id,created_by,created_at,expires_at,kind) VALUES (?,?,?,?,?,'reset')").bind(await sha256(code), u.id, "self-service", nowISO(), new Date(Date.now() + 2 * 3600e3).toISOString()),
         env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), u.name, "Requested a password reset link.")
       ]);
-      await queueSystemMail(env, ctx, {to_name: u.name, to_addr: u.email, subject: "Reset your " + brand.name + " Appraisal Desk password", template: "reset",
-        body: "Someone asked to reset the password for " + u.email + " on the " + brand.name + " Appraisal Desk. If that was you, choose a new password here within two hours: " + publicUrl(env, req) + "/#invite=" + code + "\n\nIf it was not you, ignore this message; your password has not changed."});
+      await queueSystemMail(env, ctx, {to_name: u.name, to_addr: u.email, subject: "Reset your Apprifi password (" + brand.name + ")", template: "reset",
+        body: "Someone asked to reset the password for " + u.email + " on Apprifi for " + brand.name + ". If that was you, choose a new password here within two hours: " + publicUrl(env, req) + "/#invite=" + code + "\n\nIf it was not you, ignore this message; your password has not changed."});
     }
     return json({ok: true, message: "If that address has an active account, a reset link is on its way. It lasts two hours."});
   }
@@ -688,7 +700,7 @@ async function api(req, env, ctx) {
         slots: o.step === 2 && !o.hold && !o.cancelled ? CORE.genSlots(cfg, booked, Date.now(), 24) : [],
         report: report || null, consent: !!(o.consent && o.consent[party]), tz: cfg.timeZone || CORE.TZ,
         lender: {name: cfg.lenderName, tagline: cfg.brand.tagline || "", logo: cfg.brand.logoKey ? "/brand/logo?v=" + (cfg.brand.logoVersion || 1) : cfg.brand.logo, primary: cfg.brand.primary, accent: cfg.brand.accent},
-        docRequest: o.docRequest && CORE.isOpen(o) ? o.docRequest.items : "", uploaded,
+        docRequest: o.docRequest && CORE.isOpen(o) ? o.docRequest.items : "", uploaded, clientType: CORE.clientType().key,
         thread: (o.thread || []).filter(t => t.role === "client" || t.to === "client").map(t => ({at: t.at, who: t.who, mine: t.role === "client" && t.who === actor.name, text: t.text, via: t.via || "portal"})).slice(-50),
         open: CORE.isOpen(o)
       });
@@ -710,7 +722,7 @@ async function api(req, env, ctx) {
       if (await limited(env, "cmsg:" + tok, 40, 24 * 3600e3)) throw new ApiError(429, "rate", "Message limit reached for today. Please call instead.");
       const body = await readJSON(req);
       const r = await runAction(env, publicUrl(env, req), ctx, o.id, "post", {text: s(body.text, 2000)}, actor);
-      return json({ok: true, reply: "Sent. " + (cfg.appraiserName || "The appraiser") + " and your lender have been notified."});
+      return json({ok: true, reply: "Sent. " + (cfg.appraiserName || "The appraiser") + " and " + cfg.lenderName + " have been notified."});
     }
     if (method === "GET" && p(3) === "appointment.ics") {
       if (!o.apptStart) throw notFound("No appointment is booked.");
@@ -738,7 +750,7 @@ async function api(req, env, ctx) {
   if (path === "/api/session" && method === "GET") {
     const user = await currentUser(env, req);
     const count = (await env.DB.prepare("SELECT COUNT(*) n FROM users").first()).n;
-    const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv", demo: !!env.DEMO, brand: await loadBrand(env)};
+    const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv", demo: !!env.DEMO, brand: await loadBrand(env), clientType: CORE.clientType().key};
     if (user) { out.config = await loadConfig(env, user.role === "appraiser" ? user.id : undefined); out.appraisers = (await env.DB.prepare("SELECT id,name FROM users WHERE role='appraiser' AND active=1 ORDER BY name").all()).results || []; }
     return json(out);
   }
@@ -820,8 +832,8 @@ async function api(req, env, ctx) {
     const brand = await loadBrand(env);
     const to_addr = channel === "sms" ? s(b.to || user.phone, 40) : user.email;
     if (!to_addr) throw bad("Add a mobile number to your account first (People, your row).");
-    const m = {id: uid("m"), order_id: "", to_name: user.name, to_addr, subject: brand.name + " Appraisal Desk: test message",
-      body: channel === "sms" ? brand.name + " Appraisal Desk test: text delivery works. Reply STOP to opt out." : "This is a delivery test sent by " + user.name + " from the " + brand.name + " Appraisal Desk at " + nowISO() + ".\n\nIf you are reading it, email delivery works: " + publicUrl(env, req)};
+    const m = {id: uid("m"), order_id: "", to_name: user.name, to_addr, subject: "Apprifi test message (" + brand.name + ")",
+      body: channel === "sms" ? brand.name + " via Apprifi: text delivery works. Reply STOP to opt out." : "This is a delivery test sent by " + user.name + " from Apprifi for " + brand.name + " at " + nowISO() + ".\n\nIf you are reading it, email delivery works: " + publicUrl(env, req)};
     await env.DB.prepare("INSERT INTO messages (id,order_id,created_at,channel,party,to_name,to_addr,subject,body,template,status,attempts,kind) VALUES (?,'',?,?,'system',?,?,?,?,'test','queued',0,'system')")
       .bind(m.id, nowISO(), channel, m.to_name, m.to_addr, channel === "sms" ? "" : m.subject, m.body).run();
     try {
@@ -965,7 +977,7 @@ async function api(req, env, ctx) {
       const brand = await loadBrand(env);
       const admins = (await env.DB.prepare("SELECT name,email FROM users WHERE role='admin' AND active=1 AND id<>?").bind(user.id).all()).results || [];
       const to = [...admins]; if (env.VENDOR_EMAIL && emailOk(env.VENDOR_EMAIL)) to.push({name: "Vendor", email: env.VENDOR_EMAIL});
-      const body = kind + " from " + user.name + " (" + CORE.ROLES[role].name + ") on the " + brand.name + " Appraisal Desk" + (b.screen ? ", screen: " + s(b.screen, 40) : "") + (b.order ? ", order: " + s(b.order, 120) : "") + "\n\n" + text + "\n\nAll feedback: " + publicUrl(env, req) + "/#v=feedback";
+      const body = kind + " from " + user.name + " (" + CORE.ROLES[role].name + ") on Apprifi for " + brand.name + (b.screen ? ", screen: " + s(b.screen, 40) : "") + (b.order ? ", order: " + s(b.order, 120) : "") + "\n\n" + text + "\n\nAll feedback: " + publicUrl(env, req) + "/#v=feedback";
       let n = 0; for (const t of to) { const r = await queueSystemMail(env, ctx, {to_name: t.name, to_addr: t.email, subject: "Portal feedback: " + kind + " from " + user.name, template: "feedback", body}); if (r.status === "queued") n++; }
       return json({ok: true, notified: n});
     }
@@ -1137,7 +1149,7 @@ async function fileRoute(req, env) {
   } else {
     const user = await currentUser(env, req);
     if (!user) throw new ApiError(401, "signin", "Please sign in.");
-    if (user.role === "officer" && !["report", "addendum", "invoice"].includes(d.kind)) throw denied("Loan officers can open the finished report and invoice only.");
+    if (user.role === "officer" && !["report", "addendum", "invoice"].includes(d.kind)) throw denied(CORE.ROLES.officer.name + "s can open the finished report and invoice only.");
     // downloads of the other side's documents go on the record (an appraiser opening their own report does not)
     if (user.role !== d.uploaded_role) await writeEvents(env, d.order_id, [{at: nowISO(), who: user.name, role: user.role, what: "Downloaded " + d.name + "."}]);
   }
@@ -1155,6 +1167,7 @@ const SEC = {
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+    CORE.setClientType(env.CLIENT_TYPE || "lender");
     try {
       if (url.pathname === "/api" || url.pathname.startsWith("/api/")) return await api(req, env, ctx);
       if (url.pathname.startsWith("/f/")) return await fileRoute(req, env);
@@ -1180,6 +1193,7 @@ export default {
   /* Inbound mail (Cloudflare Email Routing -> this Worker). Replies to desk+<orderId>@domain land on that order's
      conversation; anything else is matched by the sender's address; the rest waits on the Outbox screen. */
   async email(message, env, ctx) {
+    CORE.setClientType(env.CLIENT_TYPE || "lender");
     const base = (env.PUBLIC_URL || "").replace(/\/$/, "");
     let parsed;
     try { parsed = await PostalMime.parse(message.raw); } catch (e) { parsed = {}; }
@@ -1206,6 +1220,7 @@ export default {
     }
   },
   async scheduled(event, env, ctx) {
+    CORE.setClientType(env.CLIENT_TYPE || "lender");
     ctx.waitUntil((async () => {
       if (env.DEMO && event.cron === "0 8 * * *") { await resetDemo(env, (env.PUBLIC_URL || "").replace(/\/$/, ""), {createOrder, runAction, setPassword, store, writeEvents, uid, randomToken, nowISO}); return; }
       await env.DB.prepare("UPDATE messages SET status='queued' WHERE status='sending' AND created_at < ?").bind(new Date(Date.now() - 10 * 60e3).toISOString()).run();

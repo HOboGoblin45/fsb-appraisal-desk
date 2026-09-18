@@ -21,7 +21,7 @@ function client() {
   await apr.post("/api/login", {email: "sam@example.com", password: "sam-password-123"});
 
   console.log("brand");
-  let r = await anon.get("/api/brand"); ok(r.status === 200 && r.data.brand.name === "First Security Bank" && r.data.brand.logo === "/fsb-logo.png", "public brand from environment: " + r.data.brand.name);
+  let r = await anon.get("/api/brand"); ok(r.status === 200 && r.data.brand.name === "First Security Bank" && r.data.brand.logo === "" && r.data.brand.productName === "Apprifi" && r.data.brand.primary === "#12324f", "public brand from environment (Apprifi look, lender name): " + r.data.brand.name);
   r = await desk.put("/api/brand", {name: "X"}); ok(r.status === 403, "desk cannot rebrand");
   r = await admin.put("/api/brand", {name: "Prairie Community Bank", tagline: "Pontiac and Fairbury", primary: "#0b5d3b", accent: "#a33", timeZone: "America/Chicago", productName: "Appraisal Desk"}); ok(r.status === 200 && r.data.brand.name === "Prairie Community Bank" && r.data.brand.primary === "#0b5d3b" && r.data.brand.accent === "#a33" ? false : r.status === 200, "admin rebrands (invalid short hex ignored)");
   const lfd = new FormData(); lfd.append("file", new Blob([Buffer.from("89504e470d0a1a0a", "hex")], {type: "image/png"}), "logo.png");

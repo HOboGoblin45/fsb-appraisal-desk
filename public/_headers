@@ -9,3 +9,12 @@
 
 /fsb-logo.png
   Cache-Control: public, max-age=86400
+
+/apprifi-logo.svg
+  Cache-Control: public, max-age=86400
+
+/apprifi-mark.svg
+  Cache-Control: public, max-age=86400
+
+/favicon.png
+  Cache-Control: public, max-age=86400

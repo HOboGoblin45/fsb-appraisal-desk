@@ -1,13 +1,13 @@
   :root{
     color-scheme:light;
-    --navy:#1f4984;
+    --navy:#12324f;
     --on-navy:#ffffff;
     --on-red:#ffffff;
-    --navy-deep:#16355f;
+    --navy-deep:#0e273d;
     --navy-soft:#eaf0f8;
     --blue:#03138c;
-    --red:#790000;
-    --red-soft:#f7ebeb;
+    --red:#d4652a;
+    --red-soft:#fbeee6;
     --sand:#e8d5b5;
     --sand-soft:#fbf6ee;
     --ink:#22303f;
@@ -52,8 +52,14 @@
 
   header.top{background:var(--surface);border-bottom:1px solid var(--line);padding:14px 0}
   .topin{max-width:1180px;margin:0 auto;padding-inline:16px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between}
-  .logo{display:block;height:46px;max-width:280px;width:auto;object-fit:contain;background:#fff;padding:3px 5px;border-radius:2px}
-  @media (max-width:420px){.logo{height:38px}}
+  .brandlock{display:flex;align-items:center;gap:14px;text-decoration:none;color:inherit;min-width:0}
+  .brandlock .plogo{display:block;height:40px;width:auto}
+  .brandlock .lsep{width:1px;height:34px;background:var(--line);flex:none}
+  .brandlock .llogo{display:block;height:40px;max-width:220px;width:auto;object-fit:contain}
+  .brandlock .lname{display:flex;flex-direction:column;line-height:1.15;min-width:0}
+  .brandlock .lname b{font-family:var(--serif);font-size:17px;color:var(--navy);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .brandlock .lname span{font-size:11.5px;color:var(--ink-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  @media (max-width:520px){.brandlock{gap:10px}.brandlock .plogo{height:32px}.brandlock .lsep{height:26px}.brandlock .lname b{font-size:15px}.brandlock .lname span{display:none}}
 
   .band{background:var(--navy);border-bottom:3px solid var(--navy-deep)}
   .bandin{max-width:1180px;margin:0 auto;padding-inline:16px;display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}
@@ -312,6 +318,7 @@
   .dayoff button{border:0;background:none;color:var(--red);font-weight:700;cursor:pointer;padding:0 2px}
   .signwrap{max-width:460px;margin:0 auto}
   .brandline{font-size:12px;color:var(--ink-3);text-align:center;margin-top:14px}
+  .brandline a{color:var(--ink-3)}
   @media (max-width:640px){ .filters .search{max-width:none;min-width:0;width:100%;margin-left:0} .filters .search input{font-size:16px;min-height:40px} .menu{right:8px} }
 
   /* 2026 platform features, each with a safe fallback */

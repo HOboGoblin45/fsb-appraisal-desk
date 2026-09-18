@@ -1,10 +1,18 @@
-# Appraisal Desk
+# Apprifi
 
 The appraisal order, status, scheduling and delivery portal for a lender and its appraisers. One web address per lender, four staff roles, and a personal status page for each borrower and agent. Runs on Cloudflare Workers with a D1 database and KV document storage. First Security Bank's copy is https://fsb.apprifi.com; the demonstration is https://fsbdemo.apprifi.com.
 
 ## What this is, and is not
 
 This is the appraiser's direct-lender order desk, offered to each lender the appraiser works with. It gives a community or commercial lender and its own appraiser the tools an appraisal management company's portal provides (one place to order, attach documents, schedule, watch status, ask questions, receive the report and invoice, and keep the record) without putting a management company between them. The lender engages the appraiser directly, sets nothing through a panel, and pays the appraiser directly; the software does not select appraisers, set or collect fees, or review reports, and the independence record says so on every order. It is not an AMC and is not designed to become one: the multiple-appraiser features exist so a firm with a supervising or second appraiser can run its own work, not so a lender can manage a rotating panel.
+
+## Identity and client types
+
+The product is Apprifi; each client (a lender, a law firm, a wealth manager) is shown beside it as the client of record, with its own name, tagline and optional logo and colors (Lender identity, on the administrator's screen). Every message goes out in the client's name through an Apprifi address. The public site at https://apprifi.com explains the product, routes staff to their portal by work email (site/lenders.json), and takes walkthrough requests; it is a separate Worker in `site/` deployed with `npx wrangler deploy -c site/wrangler.toml`.
+
+`CLIENT_TYPE` in the environment picks the vocabulary: `lender` (default: Lender admin, Appraisal desk, Loan officer, loan number, recusal attestation required, independence record), `firm` (Firm administrator, Paralegal, Attorney, matter number, no attestation, order record) or `wealth` (Firm administrator, Coordinator, Advisor). The four role keys and every permission are the same; only names, hints, labels and the record's wording change. Purposes include estate, trust or gift, divorce or partition and tax appeal; products include date-of-death and retrospective work. `node lender.js new --type firm ...` stands up a firm.
+
+Hostnames: fsb.apprifi.com (First Security Bank, live), demo.apprifi.com (public demonstration as the fictional Prairie Community Bank), fsbdemo.apprifi.com (the same demonstration data under First Security Bank's name, for Ryan Curtis). The two demo hosts share one database; the demo Worker's nightly cron reseeds it.
 
 ## Version 2: any lender
 
@@ -26,6 +34,9 @@ Roles: Lender admin manages people and settings and can see every order. Apprais
 
 ## Going into service
 
+State of the First Security Bank installation (18 September 2026): Workers Paid plan active; apprifi.com onboarded for Cloudflare Email Sending and the Worker deployed with the EMAIL binding (a test message from the production portal reached a Gmail inbox); Email Routing sends desk@apprifi.com, with subaddressing, to the Worker so replies land on the order; documents go to the R2 bucket fsb-portal-docs (verified with a real upload); texting waits on the Twilio account upgrade, a number, and its verification.
+
+
 1. The bank tells the vendor who its administrator is (name and work email). The vendor runs, from the deploying PC:
 
        node provision.js admin --name "Full Name" --email person@fsb1.com
@@ -40,7 +51,7 @@ Roles: Lender admin manages people and settings and can see every order. Apprais
 
 Every notice the portal composes is queued in the database and sent by the first delivery adapter that is configured; nothing depends on anyone remembering to press send. Email goes out as branded HTML (lender colors and name, the first link as a button) with a plain-text part. Until an adapter is configured, the Outbox still shows every message with an "Open in email app" or "Open in Messages" button that drafts it by hand and a "Mark as sent" button so the record shows who sent it.
 
-Email adapters, in the order the server tries them:
+Email adapters (a JSON relay, when set, overrides the other two):
 
 1. Cloudflare Email Service, the recommended path because there is no key to manage. It requires the Workers Paid plan ($5 a month, which also raises the CPU limit and D1 restore window). In the Cloudflare dashboard open Compute, Email Service, Email Sending, choose Onboard Domain and pick apprifi.com; Cloudflare adds the SPF, DKIM, DMARC and bounce records itself. Then uncomment the two `[[send_email]]` lines in wrangler.toml, set `MAIL_FROM` under `[vars]` to an address on that domain, and redeploy.
 2. Resend: create the account, verify the sending domain with the DNS records it gives you, and run `npx wrangler secret put RESEND_API_KEY` (free tier: 3,000 emails a month).
@@ -105,7 +116,7 @@ Secrets are never in the repository: AUTH_SECRET (required, signs sessions and p
 
 `node provision.js status` shows how many accounts and orders the production database holds without opening anything else.
 
-To run locally: `npx wrangler d1 migrations apply fsb-portal --local`, then `npm run dev`, then open http://127.0.0.1:8787. `node test/api.js` then `node test/v2.js` run the API suites against it (84 and 39 checks). `./devmail.sh` starts a copy on port 8789 with every delivery adapter pointed at the in-process sink in `test/sink.js`; `node test/backend.js` then runs 95 checks covering real sending, HTML mail, invitations and resets by email, Twilio webhooks and signatures, STOP and START, replies by text and by email (through wrangler's local `/cdn-cgi/handler/email` endpoint), attachments, the conversation, feedback copies, test sends, upload content checks, download headers and record entries, relay outages and retries, and password changes signing out other devices.
+To run locally: `npx wrangler d1 migrations apply fsb-portal --local`, then `npm run dev`, then open http://127.0.0.1:8787. `node test/api.js` then `node test/v2.js` run the API suites against it (84 and 39 checks); `./devfirm.sh` and `node test/firm.js` cover a law-firm client (13 checks). `./devmail.sh` starts a copy on port 8789 with every delivery adapter pointed at the in-process sink in `test/sink.js`; `node test/backend.js` then runs 95 checks covering real sending, HTML mail, invitations and resets by email, Twilio webhooks and signatures, STOP and START, replies by text and by email (through wrangler's local `/cdn-cgi/handler/email` endpoint), attachments, the conversation, feedback copies, test sends, upload content checks, download headers and record entries, relay outages and retries, and password changes signing out other devices.
 
 ## Backups
 

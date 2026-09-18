@@ -1,6 +1,6 @@
-# FSB Appraisal Desk: administrator guide
+# Apprifi: administrator guide (First Security Bank)
 
-For the person First Security Bank has designated to administer the portal at https://fsb.apprifi.com.
+For the person First Security Bank has designated to administer its Apprifi portal at https://fsb.apprifi.com. The portal carries the Apprifi name with First Security Bank shown beside it as the client; you can add the bank's logo and colors under Lender identity or leave the Apprifi look.
 
 ## Your first sign-in
 

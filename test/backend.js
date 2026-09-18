@@ -53,7 +53,7 @@ function pdf() { return new Blob(["%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%E
   r = await admin.get("/api/session"); ok(r.data.providers.email && r.data.providers.emailVia === "hook" && r.data.providers.sms && r.data.providers.inboundEmail, "session reports email (relay), texts and inbound mail all on: " + JSON.stringify(r.data.providers));
   r = await admin.post("/api/users", {name: "Maria Lopez", email: "maria@example.com", role: "desk", phone: "(309) 555-0102"}); ok(r.status === 200 && r.data.emailed === true, "adding a person emails the invitation (emailed=true)");
   let mail = await until(async () => (await sinkMail()).find(m => m.to === "maria@example.com"));
-  ok(!!mail && /Appraisal Desk sign-in/.test(mail.subject) && /#invite=[a-z0-9]+/.test(mail.text), "invitation arrived at the relay with the sign-in link");
+  ok(!!mail && /Your Apprifi sign-in for First Security Bank/.test(mail.subject) && /#invite=[a-z0-9]+/.test(mail.text), "invitation arrived at the relay with the sign-in link");
   ok(mail && /<html/.test(mail.html) && /First Security Bank/.test(mail.html) && /background:#/.test(mail.html) && /href="http:\/\/127\.0\.0\.1:8789\/#invite=/.test(mail.html), "invitation has a branded HTML part with the link as a button");
   ok(mail && mail.replyTo === undefined, "system mail carries no order reply-to");
   const mariaCode = /#invite=([a-z0-9]+)/.exec(mail.text)[1];
@@ -87,7 +87,7 @@ function pdf() { return new Blob(["%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%E
   ok(r.status === 200, "order placed"); const O = r.data.order;
   mail = await until(async () => (await sinkMail()).find(m => m.to === "sam@example.com" && /New appraisal order/.test(m.subject)));
   ok(!!mail, "appraiser's new-order email was sent through the relay");
-  ok(mail && mail.replyTo === "First Security Bank Appraisal Desk <desk+" + O.id + "@fsb.apprifi.com>", "order mail replies come back tagged with the order id: " + (mail && mail.replyTo));
+  ok(mail && mail.replyTo === "First Security Bank via Apprifi <desk+" + O.id + "@fsb.apprifi.com>", "order mail replies come back tagged with the order id: " + (mail && mail.replyTo));
   r = await desk.get("/api/orders/" + O.id); ok(r.data.order.messages.every(m => m.status === "sent" && /^mail_/.test(m.provider_id || "") || m.status !== "queued"), "message rows record sent + provider id");
   r = await apr.post("/api/orders/" + O.id + "/actions", {action: "accept", params: {fee: 550, etaDate: "2026-10-20"}}); ok(r.status === 200, "appraiser accepts");
   let sms = await until(async () => (await sinkSms()).find(x => x.To === "+13095550188"));
@@ -118,7 +118,7 @@ function pdf() { return new Blob(["%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%E
   let th = r.data.order.thread || [];
   ok(th.length === 1 && th[0].role === "client" && th[0].who === "Dana Whitfield" && th[0].via === "text message" && /Tuesday afternoon/.test(th[0].text), "borrower's text is on the order's conversation as a client entry");
   ok(r.data.order.events.some(e => /Message from Dana Whitfield \(client, by text message\)/.test(e.what)), "and on the independence record");
-  mail = await until(async () => (await sinkMail()).filter(m => /Message from Dana Whitfield/.test(m.subject)));
+  mail = await until(async () => { const l = (await sinkMail()).filter(m => /Message from Dana Whitfield/.test(m.subject)); return l.length >= 2 ? l : null; });
   ok(mail && mail.length === 2 && mail.some(m => m.to === "sam@example.com") && mail.some(m => m.to === "maria@example.com"), "appraiser and desk were emailed about it");
   const cl = client();
   r = await cl.get("/api/client/" + O.tokB); ok(r.status === 200 && r.data.thread.length === 1 && r.data.thread[0].mine === true, "borrower sees their own message on the status page");
@@ -145,7 +145,7 @@ function pdf() { return new Blob(["%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%E
 
   console.log("conversation between staff and with the client");
   await sinkReset();
-  r = await officer.post("/api/orders/" + O.id + "/actions", {action: "post", params: {text: "How is it looking?"}}); ok(r.status === 403 && /independence/.test(r.data.message), "loan officer cannot post");
+  r = await officer.post("/api/orders/" + O.id + "/actions", {action: "post", params: {text: "How is it looking?"}}); ok(r.status === 403 && /^Loan officers read the conversation/.test(r.data.message), "loan officer cannot post");
   r = await desk.post("/api/orders/" + O.id + "/actions", {action: "post", params: {text: "The seller mentioned a new roof in 2024; permit is in the file."}}); ok(r.status === 200 && r.data.reply === "Sent and logged.", "desk posts to the appraiser");
   mail = await until(async () => (await sinkMail()).find(m => m.to === "sam@example.com" && /Message on 1420/.test(m.subject)));
   ok(!!mail && /new roof/.test(mail.text) && /Logged on the independence record/.test(mail.text), "appraiser emailed the desk's message");
@@ -216,7 +216,7 @@ function pdf() { return new Blob(["%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%E
   const dl3 = await fetch(BASE + "/f/" + O.id + "/" + contract.id, {headers: {cookie: officer.cookie()}}); ok(dl3.status === 403, "officer cannot open the contract");
   const dl4 = await fetch(BASE + "/f/" + O.id + "/" + contract.id); ok(dl4.status === 401, "anonymous cannot open it");
   const dl5 = await fetch(BASE + "/f/" + O.id + "/" + contract.id + "?t=" + O.tokB); ok(dl5.status === 403, "the borrower link cannot open a staff-only file");
-  r = await desk.get("/api/session"); ok(r.data.storage === "kv", "local storage is KV (R2 is bound in production when available)");
+  r = await desk.get("/api/session"); ok(r.data.storage === "r2", "documents go to the R2 bucket (local simulation)");
 
   console.log("relay outage and retry");
   await sinkReset(); await fetch(SINK + "/failnext", {method: "POST"});

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in to Apprifi</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="/favicon.png" type="image/png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&family=PT+Serif:wght@400;700&display=swap">
+<link rel="stylesheet" href="/site.css">
+</head>
+<body>
+<header class="top">
+  <div class="topin">
+    <a href="/"><img class="logo" src="/apprifi-logo.svg" alt="Apprifi" width="152" height="40"></a>
+    <nav aria-label="Site"><a href="/">Home</a><a class="btn p s" href="/#request">Request a walkthrough</a></nav>
+  </div>
+</header>
+
+<main class="narrow">
+  <div class="panel">
+    <p class="lbl">Lender staff and appraisers</p>
+    <h1>Sign in</h1>
+    <p>Each institution has its own portal. Enter your work email and we will take you to yours.</p>
+    <form id="signin" novalidate>
+      <label class="sm" style="font-weight:600;color:var(--ink-2)">Work email<input name="email" type="email" autocomplete="username" inputmode="email" placeholder="you@yourbank.com" style="margin-top:5px;width:100%"></label>
+      <button class="btn p" type="submit">Continue</button>
+      <span id="simsg" role="status"></span>
+    </form>
+    <p class="sm" style="margin-top:18px">Know your portal address? Go there directly, for example <span style="font-family:var(--mono)">yourbank.apprifi.com</span>. Forgot your password? Use the link on your portal's sign-in page.</p>
+  </div>
+
+  <div class="panel" style="margin-top:18px">
+    <p class="lbl">Borrowers and agents</p>
+    <h1 style="font-size:20px">You do not sign in.</h1>
+    <p>Your lender's text or email carries a personal link that opens your appraisal's status page, the booking calendar, and your report once it is delivered. If you have lost the link, ask your loan officer to resend it.</p>
+  </div>
+
+  <div class="panel" style="margin-top:18px">
+    <p class="lbl">Just looking</p>
+    <h1 style="font-size:20px">Try the demonstration</h1>
+    <p>Sample people and orders at every stage, one-click sign-in as any role, nothing sent to anyone. <a href="https://demo.apprifi.com" rel="noopener">Open the live demo</a>.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap row">
+    <div>Cresci Appraisal &amp; Consulting Company, Bloomington-Normal, Illinois. <a href="/#request" style="margin:0">Request a walkthrough</a></div>
+    <div><a href="/">Home</a><a href="/security">Security and privacy</a></div>
+  </div>
+</footer>
+<script src="/site.js"></script>
+</body>
+</html>

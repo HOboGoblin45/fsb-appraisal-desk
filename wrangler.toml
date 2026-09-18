@@ -24,9 +24,9 @@ LENDER_TAGLINE = "Mackinaw, Heritage Lake, Deer Creek, Danvers"
 LENDER_LOGO = "fsb-logo.png"
 TIMEZONE = "America/Chicago"
 VENDOR_EMAIL = "crescicharles@gmail.com"
-# MAIL_FROM = "First Security Bank Appraisal Desk <appraisals@fsb.apprifi.com>"
+MAIL_FROM = "First Security Bank Appraisal Desk <no-reply@apprifi.com>"
 # MAIL_REPLY_TO = "someone@fsb1.com"
-# MAIL_INBOUND = "desk@fsb.apprifi.com"   # set once Email Routing sends desk@ (or a catch-all) to this Worker
+MAIL_INBOUND = "desk@apprifi.com"   # Email Routing sends desk@apprifi.com (subaddressing on) to this Worker
 
 # Orders, people, audit log, message queue. Create with: npx wrangler d1 create fsb-portal
 [[d1_databases]]
@@ -42,15 +42,15 @@ id = "85874fed1930410eb70ea081b9278011"
 
 # Optional larger document store (needs R2 enabled on the account). Uncomment to switch new uploads to R2;
 # earlier files stay readable from KV because each document records where it lives.
-# [[r2_buckets]]
-# binding = "BUCKET"
-# bucket_name = "fsb-portal-docs"
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "fsb-portal-docs"
 
 # Automatic email through Cloudflare Email Service (Workers Paid plan). After onboarding apprifi.com under
 # Compute > Email Service > Email Sending, uncomment these two lines and redeploy. Alternative: the
 # RESEND_API_KEY secret. Either way the portal sends branded HTML mail with plain-text fallback.
-# [[send_email]]
-# name = "EMAIL"
+[[send_email]]
+name = "EMAIL"
 
 # Retries queued email every five minutes and prunes expired sessions.
 [triggers]

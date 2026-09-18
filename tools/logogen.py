@@ -69,11 +69,19 @@ def pin(navy, orange):
     return body + roof + door
 
 def aframe(navy, orange):
-    """An A-frame house: steep rafters to the ground, a loft beam as the crossbar, an orange door."""
+    """An A-frame house: steep rafters to the ground, a loft beam as the crossbar, a glazed gable window above it, a plank door below."""
+    # gable window: the triangle between the rafters' inner edges and the beam, glazed, with a mullion cross
+    window = (f'<polygon points="50,18 27,60 73,60" fill="#dfeaf3"/>'
+              f'<path d="M50 30 L50 60 M36 47 L64 47" stroke="{navy}" stroke-width="2.6" stroke-linecap="round" opacity=".9"/>')
     rafters = stroke("M14 88 L50 14 L86 88", navy, 17)
     beam = stroke("M30 60 L70 60", navy, 14, cap="butt")
-    door = f'<rect x="42" y="70" width="16" height="26" rx="3" fill="{orange}"/>'
-    return rafters + beam + door
+    # plank door: wood tones, two grooves, a knob
+    door = (f'<defs><linearGradient id="wood" x1="0" y1="0" x2="1" y2="0">'
+            f'<stop offset="0" stop-color="#c9743a"/><stop offset=".5" stop-color="{orange}"/><stop offset="1" stop-color="#b85d24"/></linearGradient></defs>'
+            f'<rect x="41" y="69" width="18" height="27" rx="3" fill="url(#wood)"/>'
+            f'<path d="M47 71.5 V94 M53 71.5 V94" stroke="#9a4a1a" stroke-width="1.4" opacity=".75"/>'
+            f'<circle cx="55.5" cy="83" r="1.6" fill="#f6e3c8"/>')
+    return window + rafters + beam + door
 
 CONCEPTS = {"aframe": aframe, "checkA": checkA, "roofbar": roofbar, "houserail": houserail, "tile": tile, "ligature": ligature, "pin": pin}
 

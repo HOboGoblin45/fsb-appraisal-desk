@@ -65,10 +65,10 @@ var CORE = (function(){
 
   /* what each role may do; the server enforces this, the browser only hides buttons */
   var PERM = {
-    admin:    {view:true, people:true, config:true, brand:true, cancel:true, note:true, docs:true, outbox:true, assign:true, paid:true, revise:true},
-    desk:     {view:true, place:true, edit:true, cancel:true, ask:true, note:true, docs:true, outbox:true, hold:true, renotify:true, reissue:true, book:true, assign:true, paid:true, revise:true, docreq:true},
+    admin:    {view:true, people:true, config:true, brand:true, cancel:true, note:true, docs:true, outbox:true, assign:true, paid:true, revise:true, post:true},
+    desk:     {view:true, place:true, edit:true, cancel:true, ask:true, note:true, docs:true, outbox:true, hold:true, renotify:true, reissue:true, book:true, assign:true, paid:true, revise:true, docreq:true, post:true, postclient:true},
     officer:  {view:true, docs:false, outbox:true},
-    appraiser:{view:true, accept:true, decline:true, schedule:true, renotify:true, book:true, inspect:true, review:true, deliver:true, invoice:true, hold:true, fee:true, config:true, docs:true, note:true, outbox:true, prelim:true, reviewer:true, docreq:true}
+    appraiser:{view:true, accept:true, decline:true, schedule:true, renotify:true, book:true, inspect:true, review:true, deliver:true, invoice:true, hold:true, fee:true, config:true, docs:true, note:true, outbox:true, prelim:true, reviewer:true, docreq:true, post:true, postclient:true}
   };
   function can(role,what){ return !!(PERM[role]&&PERM[role][what]); }
 
@@ -219,6 +219,28 @@ var CORE = (function(){
     reply:function(o,c,p){ return [
       {channel:"email",party:"desk",subject:"Reply on "+o.addr,body:(p&&p.text||"")+"\n\nFrom "+aprLower(c)+" through the portal. [portal]"}
     ];},
+    /* conversation: one thread per order. p.to is "staff" or "client"; p.role is the sender's role. */
+    post:function(o,c,p){
+      var text=(p&&p.text)||"", by=(p&&p.by)||"", role=(p&&p.role)||"";
+      if(p&&p.to==="client"){
+        var cp=contactParty(o);
+        return [
+          {channel:"sms",party:cp,body:(role==="appraiser"?aprCap(c):lenderName(c))+" about "+o.addr+": "+text.slice(0,240)+(text.length>240?"...":"")+" Reply here: [link]"},
+          {channel:"email",party:cp,subject:"Message about your appraisal: "+o.addr,body:text+"\n\nFrom "+by+(role==="appraiser"?"":(" at "+lenderName(c)))+". You can reply on your status page: [link]"}
+        ];
+      }
+      if(role==="client"){
+        var m=[{channel:"email",party:"appraiser",subject:"Message from "+by+" on "+o.addr,body:text+"\n\nSent by "+by+" from their status page. Reply in the portal: [portal]"}];
+        m.push({channel:"email",party:"desk",subject:"Message from "+by+" on "+o.addr,body:text+"\n\nSent by "+by+" from their status page. [portal]"});
+        return m;
+      }
+      if(role==="appraiser") return [
+        {channel:"email",party:"desk",subject:"Message on "+o.addr,body:text+"\n\nFrom "+by+" ("+aprLower(c)+") through the portal. Reply there: [portal]"}
+      ];
+      return [
+        {channel:"email",party:"appraiser",subject:"Message on "+o.addr,body:text+"\n\nSent by "+by+" ("+lenderName(c)+") through the portal. Logged on the independence record. Reply there: [portal]"}
+      ];
+    },
     assigned:function(o,c){ return [
       {channel:"email",party:"appraiser",subject:"Assigned to you: "+o.addr,body:"The appraisal at "+o.addr+", "+o.city+" ("+o.type+", "+o.purpose+") has been assigned to "+(o.assignedName||"you")+(o.due?(", due "+fmtDate(o.due)):"")+". Open it in the portal to accept or decline: [portal]"}
     ];},
@@ -396,14 +418,22 @@ var CORE = (function(){
         if(o.step>=6) fail("stale","A delivered file cannot be cancelled. Ask the appraiser about a revision instead.");
         o.cancelled=true; o.cancelReason=String(p.reason||"Other").slice(0,120)+(p.note?(": "+String(p.note).slice(0,400)):""); o.cancelledAt=now; o.apptStart=null; o.apptEnd=null;
         log("Order CANCELLED: "+o.cancelReason); send("cancelled"); reply="Cancelled. The appraiser was told to stop."+(o.clientContacted?" The client was told nothing further is needed.":""); break;
-      case "ask":
-        if(!can(role,"ask")) fail("forbidden","Only the desk can send questions.");
-        if(!p.text) fail("bad","Write a question first.");
-        log("Question from the lender: "+String(p.text).slice(0,2000)); send("ask",{text:String(p.text).slice(0,2000),by:who}); reply="Sent and logged."; break;
-      case "reply":
-        if(role!=="appraiser") fail("forbidden","Only the appraiser can reply here.");
-        if(!p.text) fail("bad","Write a reply first.");
-        log("Reply from the appraiser: "+String(p.text).slice(0,2000)); send("reply",{text:String(p.text).slice(0,2000)}); reply="Sent and logged."; break;
+      case "ask": case "reply": case "post": {
+        /* one conversation per order. Staff post to each other (and, when p.to==="client", to the borrower or agent);
+           the client posts from their status page. Every entry is logged on the independence record. */
+        var to=p.to==="client"?"client":"staff";
+        if(role==="client"){ to="staff"; }
+        else if(!can(role,"post")) fail("forbidden","Loan officers read the conversation but do not take part, which keeps the independence record clean.");
+        if(to==="client"&&!can(role,"postclient")) fail("forbidden","Only the desk or the appraiser messages the client.");
+        if(to==="client"&&!o.clientContacted) fail("stale","The client has not been contacted yet; the appraiser accepts the order first.");
+        var text=String(p.text||"").trim().slice(0,2000);
+        if(!text) fail("bad","Write a message first.");
+        if(!o.thread) o.thread=[];
+        o.thread.push({at:now,who:who,role:role,to:to,text:text,via:p.via||"portal"});
+        if(o.thread.length>300) o.thread=o.thread.slice(-300);
+        log((role==="client"?"Message from "+who+" (client"+(p.via&&p.via!=="portal"?", by "+p.via:"")+"): ":(to==="client"?"Message to the client from "+who+": ":"Message from "+who+" ("+(ROLES[role]?ROLES[role].name:role)+"): "))+text);
+        send("post",{text:text,by:who,role:role,to:to});
+        reply=to==="client"?"Sent to "+contactName(o)+" by text and email, and logged.":"Sent and logged."; break; }
       case "note":
         if(!can(role,"note")) fail("forbidden","Not allowed.");
         if(!p.text) fail("bad","Write a note first.");

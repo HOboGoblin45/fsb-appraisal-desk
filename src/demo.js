@@ -16,13 +16,13 @@ const HOUR = 3600e3, DAY = 864e5;
 
 export async function resetDemo(env, base, h) {
   const now = Date.now();
-  const ago = (days, hours = 0) => new Date(now - days * DAY - hours * HOUR).toISOString();
+  const ago = (days, hours = 0, minutes = 0) => new Date(now - days * DAY - hours * HOUR - minutes * 60e3).toISOString();
 
   // 1. wipe everything, including stored document bytes
   const docs = (await env.DB.prepare("SELECT key FROM docs").all()).results || [];
   const st = h.store(env);
   for (const d of docs) { try { await st.del(d.key); } catch (e) {} }
-  await env.DB.batch(["messages", "events", "docs", "orders", "sessions", "invites", "feedback", "ratelimit", "audit", "config", "users"].map(t => env.DB.prepare("DELETE FROM " + t)));
+  await env.DB.batch(["messages", "events", "docs", "orders", "sessions", "invites", "feedback", "ratelimit", "audit", "config", "users", "optouts", "inbound"].map(t => env.DB.prepare("DELETE FROM " + t)));
 
   // 2. people
   for (const u of DEMO_USERS) {
@@ -115,6 +115,8 @@ export async function resetDemo(env, base, h) {
   { const s = CORE.genSlots(cfg, await bookedNow(env), now, 12); await act(C.id, "book", {slot: s[3]}, {name: "Angela Moss", role: "client"}, ago(4, 18)); }
   await act(C.id, "ask", {text: "Angela asked whether she needs to be home for the whole inspection. Anything else she should have ready?"}, deskActor, ago(2));
   await act(C.id, "reply", {text: "She only needs to let me in and show me the basement access. About an hour. Permits for the basement would be helpful if she has them handy."}, apr, ago(1, 20));
+  await act(C.id, "post", {text: "Angela, I will be there about an hour. Please leave the basement door unlocked and have the finish permit handy if you can.", to: "client"}, apr, ago(1, 19, 30));
+  await act(C.id, "post", {text: "Will do. The permit is in a folder on the kitchen counter. My daughter will let you in if I am not back from work.", via: "text message"}, {name: "Angela Moss", role: "client"}, ago(1, 19, 10));
   await act(C.id, "docreq", {items: "Basement finish permit and the contractor's invoice"}, apr, ago(1, 19));
   await addDoc(C, "basement-permit-2023.pdf", "other", "contract", "Angela Moss", "client", false, ago(1, 2));
   await h.writeEvents(env, C.id, [{at: ago(1, 2), who: "Angela Moss", role: "client", what: "Angela Moss uploaded basement-permit-2023.pdf."}]);

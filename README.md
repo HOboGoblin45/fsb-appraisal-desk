@@ -38,23 +38,43 @@ Roles: Lender admin manages people and settings and can see every order. Apprais
 
 ## Email and texting
 
-Until an email service key is added, nothing is sent automatically. Every message the system composes appears in the Outbox with its real wording and an "Open in email app" button that drafts it in Outlook or Gmail; press send there, then "Mark as sent" so the record shows who sent it. Texts have an "Open in Messages" button that drafts the text on a phone. Notices to bank staff and the appraiser are not queued while email is off, because they see the same live board.
+Every notice the portal composes is queued in the database and sent by the first delivery adapter that is configured; nothing depends on anyone remembering to press send. Email goes out as branded HTML (lender colors and name, the first link as a button) with a plain-text part. Until an adapter is configured, the Outbox still shows every message with an "Open in email app" or "Open in Messages" button that drafts it by hand and a "Mark as sent" button so the record shows who sent it.
 
-To turn on automatic email, the recommended path stays inside the same Cloudflare account: Cloudflare Email Service (beta, requires the Workers Paid plan at $5 a month, which includes 3,000 emails a month and also lifts the free plan's CPU limit). In the Cloudflare dashboard open Compute, Email Service, Email Sending, choose Onboard Domain and pick apprifi.com or fsb.apprifi.com; Cloudflare adds the SPF, DKIM, DMARC and bounce records itself because the DNS is already there. Then uncomment the two `[[send_email]]` lines in wrangler.toml, set `MAIL_FROM` under `[vars]` to an address on that domain, and redeploy. The alternative is Resend: create the account, verify the domain with the DNS records it gives you, and run `npx wrangler secret put RESEND_API_KEY`. Either way, queued messages go out within seconds and retry every five minutes, up to six attempts, if the service is down. Set `MAIL_REPLY_TO` to a bank mailbox so replies reach the desk.
+Email adapters, in the order the server tries them:
 
-To turn on automatic texting: complete A2P 10DLC brand and campaign registration with Twilio (several weeks), then set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM the same way.
+1. Cloudflare Email Service, the recommended path because there is no key to manage. It requires the Workers Paid plan ($5 a month, which also raises the CPU limit and D1 restore window). In the Cloudflare dashboard open Compute, Email Service, Email Sending, choose Onboard Domain and pick apprifi.com; Cloudflare adds the SPF, DKIM, DMARC and bounce records itself. Then uncomment the two `[[send_email]]` lines in wrangler.toml, set `MAIL_FROM` under `[vars]` to an address on that domain, and redeploy.
+2. Resend: create the account, verify the sending domain with the DNS records it gives you, and run `npx wrangler secret put RESEND_API_KEY` (free tier: 3,000 emails a month).
+3. A JSON relay: `MAIL_HOOK_URL` (and optional `MAIL_HOOK_TOKEN`) posts `{from,to,subject,text,html,replyTo}` to a URL. The test suite uses this; a lender with its own transactional mail gateway can too.
+
+Queued messages go out within seconds and retry every five minutes, up to six attempts, if the service is down. Two dispatchers can never send the same message twice: each row is claimed before it is sent.
+
+Texts go through Twilio once `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and either `TWILIO_MESSAGING_SERVICE_SID` (preferred with A2P 10DLC) or `TWILIO_FROM` are set as secrets. US carriers require A2P 10DLC brand and campaign registration (or a verified toll-free number) before software may text; Twilio walks through it. In the Twilio console point the number's incoming-message webhook at `https://fsb.apprifi.com/api/hooks/twilio/inbound`; delivery reports arrive at `/api/hooks/twilio/status` automatically. Both endpoints check Twilio's signature. A reply of STOP records an opt-out and later texts to that number are held (marked "Opted out" in the Outbox, the email still goes); START lifts it. Carrier delivery states (delivered, undelivered with the error code) show on each text, and an undelivered text writes "call them instead" on the order's record.
+
+Replies come back to the order. Every text from a borrower or agent is matched to their open order by phone number and posted on that order's Conversation tab, with the appraiser and the desk emailed. For email, set `MAIL_INBOUND` (for example `desk@fsb.apprifi.com`) and, under Email, Email Routing for apprifi.com, route that address (or a catch-all) to the `fsb-appraisal-desk` Worker. Notices then carry a reply-to of `desk+<order>@fsb.apprifi.com`; a reply lands on that order's conversation with the quoted history stripped, PDF or image attachments become documents on the order, and a staff member replying from their own inbox is posted under their own name. Anything that cannot be matched waits at the bottom of the Outbox screen as unmatched.
+
+The administrator can prove delivery works at any time: Lender settings, Delivery and notifications, "Send me a test email" or "Send me a test text" sends to their own address and shows the provider's answer.
+
+Other mail the portal sends when email is on: invitations (added people receive their sign-in link the moment they are saved; the link is still shown to the administrator), password resets ("Forgot your password?" on the sign-in page; a two-hour, single-use link; the sign-in page only offers it when email is configured), and feedback copies to the other administrators and to `VENDOR_EMAIL`.
+
+## Conversation
+
+Each order has one conversation. The desk and the administrator post to the appraiser; the appraiser posts to the desk; the desk or the appraiser can post to the borrower or agent (delivered as a text and an email with their personal link); the borrower or agent replies from their status page, by text, or by email. Loan officers read it but cannot post, which keeps loan production staff out of the appraiser's ear. Every entry is written to the independence record, unread entries are flagged on the board and on the tab, and the client sees only what was to or from them. The older `ask` and `reply` actions still work and land on the same conversation.
 
 ## Documents
 
 PDF, images, XML (UAD), CSV, Word, Excel and ZIP up to 20 MB each. Each file is labelled by kind (sales contract, engagement letter, prior appraisal, survey, plans, appraisal report, invoice, addendum, other) and can be marked visible to the borrower and agent. Reports and addenda uploaded by the appraiser are client-visible by default and become downloadable by the borrower only after delivery and after the borrower has agreed to electronic delivery on their page. Loan officers can open reports, addenda and invoices only. Removing a document hides it from the order but keeps the bytes for the record.
 
-Storage is Workers KV (1 GB on the free plan, roughly 100 to 300 appraisal files). To move to R2 for unlimited storage, enable R2 on the Cloudflare account, create a bucket named fsb-portal-docs, uncomment the r2_buckets block in wrangler.toml and redeploy. New uploads go to R2; existing files keep working from KV.
+Every upload is checked against its extension (a text file renamed .pdf, or a file without the PDF, PNG, JPEG, WebP, HEIC or ZIP signature, is refused), stored under a random key, and served only as an attachment with a sandbox content-security policy and nosniff, so nothing uploaded can run in a browser. Staff downloads of the other side's documents are logged on the record (the appraiser opening their own report is not). Borrower links open only client-visible files, only after delivery and consent.
+
+Storage is Workers KV (1 GB on the free plan, roughly 100 to 300 appraisal files). To move to R2 for unlimited storage, enable R2 on the Cloudflare account, create a bucket named fsb-portal-docs, uncomment the r2_buckets block in wrangler.toml and redeploy. New uploads go to R2; existing files keep working from KV because each document records where it lives.
 
 ## The demonstration copy
 
 https://fsbdemo.apprifi.com is the same code deployed as a second Worker (`--env demo`) with its own database and storage. It carries a DEMO flag: a banner, one-click sign-in as any role (password FSBdemo-2026 for every sample account), messages marked composed rather than sent, a "Reset the demonstration" item in the menu, and a cron at 08:00 UTC that reloads the sample data every night. The seed (`src/demo.js`) replays eight fictional orders through the real order and action code, so every event, message and client link is genuine. Anyone with the link can use it; nothing in it is real and nothing leaves it. Deploy changes to it with `npm run build && npx wrangler deploy --env demo`; reload its data at any time with a POST to /api/demo/reset while signed in.
 
 ## Limits worth knowing
+
+Sessions: signing in on a new device does not sign out the others; changing a password does, and so does a password reset. Password reset requests are limited to three an hour per address. Client status pages accept up to 40 messages and 30 uploads a day per link.
 
 Cloudflare's free Workers plan allows 100,000 requests a day and 10 milliseconds of CPU per request. Sign-in uses PBKDF2 with 100,000 iterations, which is the most the platform allows; if sign-in ever fails with a CPU limit error, move the account to the Workers Paid plan ($5 a month), which also raises every other limit. D1 holds 5 GB. Sessions last 14 days of inactivity. Invitations last 7 days. Sign-in is rate limited to 10 attempts per email and 30 per address every 15 minutes.
 
@@ -81,11 +101,11 @@ The whole application is in this repository. `src/core.js` holds the state machi
     npx wrangler d1 migrations apply fsb-portal --remote   # after any new migration
     npx wrangler deploy
 
-Secrets are never in the repository: AUTH_SECRET (required, signs sessions and peppers passwords; changing it signs everyone out and invalidates all passwords), RESEND_API_KEY (only if not using Cloudflare Email Service), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM.
+Secrets are never in the repository: AUTH_SECRET (required, signs sessions and peppers passwords; changing it signs everyone out and invalidates all passwords), RESEND_API_KEY (only if not using Cloudflare Email Service), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_MESSAGING_SERVICE_SID or TWILIO_FROM, MAIL_HOOK_TOKEN. Set each with `npx wrangler secret put NAME` (add `--env demo` for the demonstration copy, which never sends anyway).
 
 `node provision.js status` shows how many accounts and orders the production database holds without opening anything else.
 
-To run locally: `npx wrangler d1 migrations apply fsb-portal --local`, then `npm run dev`, then open http://127.0.0.1:8787. `node test/api.js` runs the API suite against it.
+To run locally: `npx wrangler d1 migrations apply fsb-portal --local`, then `npm run dev`, then open http://127.0.0.1:8787. `node test/api.js` then `node test/v2.js` run the API suites against it (84 and 39 checks). `./devmail.sh` starts a copy on port 8789 with every delivery adapter pointed at the in-process sink in `test/sink.js`; `node test/backend.js` then runs 95 checks covering real sending, HTML mail, invitations and resets by email, Twilio webhooks and signatures, STOP and START, replies by text and by email (through wrangler's local `/cdn-cgi/handler/email` endpoint), attachments, the conversation, feedback copies, test sends, upload content checks, download headers and record entries, relay outages and retries, and password changes signing out other devices.
 
 ## Backups
 

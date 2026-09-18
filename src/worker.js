@@ -4,6 +4,7 @@
    Nothing here trusts the browser: every transition is re-validated by CORE.applyAction. */
 import CORE from "./core.js";
 import {resetDemo} from "./demo.js";
+import PostalMime from "postal-mime";
 
 const COOKIE = "fsb_session";
 const SESSION_DAYS = 14;
@@ -201,7 +202,7 @@ async function orderDetail(env, o) {
   const [docs, events, msgs] = await Promise.all([
     env.DB.prepare("SELECT id,name,size,type,kind,client_visible,uploaded_by,uploaded_role,uploaded_at FROM docs WHERE order_id=? AND deleted_at IS NULL ORDER BY uploaded_at").bind(o.id).all(),
     env.DB.prepare("SELECT at,who,role,what FROM events WHERE order_id=? ORDER BY id").bind(o.id).all(),
-    env.DB.prepare("SELECT id,created_at,channel,party,to_name,to_addr,subject,body,template,status,attempts,last_error,sent_at,sent_by FROM messages WHERE order_id=? ORDER BY created_at, id").bind(o.id).all()
+    env.DB.prepare("SELECT id,created_at,channel,party,to_name,to_addr,subject,body,template,status,attempts,last_error,sent_at,sent_by,provider_id,delivery,delivery_at FROM messages WHERE order_id=? ORDER BY created_at, id").bind(o.id).all()
   ]);
   o.docs = (docs.results || []).map(d => ({...d, client_visible: !!d.client_visible}));
   o.hasReport = o.docs.some(d => d.kind === "report");
@@ -346,35 +347,86 @@ async function runNudges(env, base) {
 }
 
 /* ---------- sending ---------- */
+/* Email goes out through the first configured adapter: the Cloudflare Email Service binding (EMAIL), Resend
+   (RESEND_API_KEY), or an HTTP sink (MAIL_HOOK_URL, used by the test suite and by any lender that already
+   has a transactional mail relay that accepts JSON). SMS goes through Twilio (account SID + auth token +
+   either a messaging service SID or a from number). Nothing is sent in the demonstration copy. */
 function providers(env) {
-  return {email: !!(env.EMAIL || env.RESEND_API_KEY), emailVia: env.EMAIL ? "cloudflare" : (env.RESEND_API_KEY ? "resend" : ""), sms: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_FROM)};
+  const emailVia = env.EMAIL ? "cloudflare" : (env.RESEND_API_KEY ? "resend" : (env.MAIL_HOOK_URL ? "hook" : ""));
+  const smsOn = !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && (env.TWILIO_MESSAGING_SERVICE_SID || env.TWILIO_FROM));
+  return {email: !!emailVia, emailVia, sms: smsOn, smsVia: smsOn ? "twilio" : "", inboundEmail: !!env.MAIL_INBOUND};
+}
+function mailHost(env) { return (env.PUBLIC_URL || "https://example.com").replace(/^https?:\/\//, "").replace(/[:/].*$/, ""); }
+function mailFrom(env, lender) { return env.MAIL_FROM || (lender + " Appraisal Desk <no-reply@" + mailHost(env) + ">"); }
+/* Replies to a notice about an order come back to desk+<orderId>@<domain> when inbound routing is on. */
+function replyTo(env, lender, orderId) {
+  if (env.MAIL_INBOUND && orderId) { const [local, domain] = String(env.MAIL_INBOUND).split("@"); if (local && domain) return lender + " Appraisal Desk <" + local + "+" + orderId + "@" + domain + ">"; }
+  return env.MAIL_REPLY_TO || undefined;
+}
+const escHtml = t => String(t).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+/* Branded HTML alongside the plain text. The first link becomes a button; every other URL is linked in place. */
+function renderEmail(brand, m) {
+  const primary = /^#[0-9a-f]{6}$/i.test(brand.primary || "") ? brand.primary : "#1f4984";
+  const urlRe = /https?:\/\/[^\s<>"')\]]+/g;
+  const first = (m.body.match(urlRe) || [])[0] || "";
+  const paras = String(m.body).split(/\n{2,}/).map(p => "<p style=\"margin:0 0 14px;font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1c2431\">" +
+    escHtml(p).replace(/\n/g, "<br>").replace(urlRe, u => "<a href=\"" + escHtml(u) + "\" style=\"color:" + primary + "\">" + escHtml(u) + "</a>") + "</p>").join("");
+  const button = first ? "<p style=\"margin:6px 0 20px\"><a href=\"" + escHtml(first) + "\" style=\"display:inline-block;background:" + primary + ";color:#ffffff;text-decoration:none;font:600 15px -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:11px 18px;border-radius:6px\">Open</a></p>" : "";
+  const foot = escHtml(brand.name) + (brand.tagline ? " &middot; " + escHtml(brand.tagline) : "") + (brand.supportLine ? "<br>" + escHtml(brand.supportLine) : "") +
+    "<br>Sent by the " + escHtml(brand.productName || "Appraisal Desk") + " portal. Links in this message are personal to you; please do not forward them.";
+  const html = "<!doctype html><html><body style=\"margin:0;background:#f3f5f8;padding:24px 12px\">" +
+    "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td align=\"center\">" +
+    "<table role=\"presentation\" width=\"600\" style=\"max-width:600px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden\" cellspacing=\"0\" cellpadding=\"0\">" +
+    "<tr><td style=\"background:" + primary + ";padding:16px 24px;font:700 17px -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#ffffff\">" + escHtml(brand.name) + "</td></tr>" +
+    "<tr><td style=\"padding:24px 24px 10px\">" + paras + button + "</td></tr>" +
+    "<tr><td style=\"padding:14px 24px 22px;font:12px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#6b7482;border-top:1px solid #e6e9ee\">" + foot + "</td></tr>" +
+    "</table></td></tr></table></body></html>";
+  return {text: m.body, html};
 }
 async function sendEmail(env, m) {
-  const lender = (await loadBrand(env)).name;
-  const host = (env.PUBLIC_URL || "https://example.com").replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  const from = env.MAIL_FROM || (lender + " Appraisal Desk <no-reply@" + host + ">");
+  const brand = await loadBrand(env), lender = brand.name;
+  const from = mailFrom(env, lender), subject = m.subject || (lender + " appraisal update");
+  const {text, html} = renderEmail(brand, m);
+  const reply = replyTo(env, lender, m.order_id);
+  const to = m.to_name ? {email: m.to_addr, name: m.to_name} : m.to_addr;
   if (env.EMAIL) {
-    // Cloudflare Email Service binding: the sending domain is verified in the same account
-    const r = await env.EMAIL.send({to: m.to_addr, from, subject: m.subject || (lender + " appraisal update"), text: m.body, replyTo: env.MAIL_REPLY_TO || undefined});
+    // Cloudflare Email Service binding: the sending domain is onboarded in the same account, no key to manage
+    const r = await env.EMAIL.send({to, from, subject, text, html, replyTo: reply, headers: m.id ? {"X-Appraisal-Desk-Message": String(m.id)} : undefined});
     return (r && r.messageId) || "";
   }
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST", headers: {"authorization": "Bearer " + env.RESEND_API_KEY, "content-type": "application/json"},
-    body: JSON.stringify({from, to: [m.to_addr], subject: m.subject || (lender + " appraisal update"), text: m.body, reply_to: env.MAIL_REPLY_TO || undefined})
+  if (env.RESEND_API_KEY) {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST", headers: {"authorization": "Bearer " + env.RESEND_API_KEY, "content-type": "application/json"},
+      body: JSON.stringify({from, to: [m.to_addr], subject, text, html, reply_to: reply})
+    });
+    const t = await res.text();
+    if (!res.ok) throw new Error("Resend " + res.status + ": " + t.slice(0, 300));
+    try { return JSON.parse(t).id || ""; } catch (e) { return ""; }
+  }
+  const res = await fetch(env.MAIL_HOOK_URL, {
+    method: "POST", headers: {"content-type": "application/json", ...(env.MAIL_HOOK_TOKEN ? {"authorization": "Bearer " + env.MAIL_HOOK_TOKEN} : {})},
+    body: JSON.stringify({id: m.id, from, to: m.to_addr, toName: m.to_name, subject, text, html, replyTo: reply, orderId: m.order_id || ""})
   });
   const t = await res.text();
-  if (!res.ok) throw new Error("Resend " + res.status + ": " + t.slice(0, 300));
+  if (!res.ok) throw new Error("Mail relay " + res.status + ": " + t.slice(0, 300));
   try { return JSON.parse(t).id || ""; } catch (e) { return ""; }
 }
 async function sendSms(env, m) {
-  const url = "https://api.twilio.com/2010-04-01/Accounts/" + env.TWILIO_ACCOUNT_SID + "/Messages.json";
-  const body = new URLSearchParams({From: env.TWILIO_FROM, To: normalizePhone(m.to_addr), Body: m.body});
-  const res = await fetch(url, {method: "POST", headers: {"authorization": "Basic " + btoa(env.TWILIO_ACCOUNT_SID + ":" + env.TWILIO_AUTH_TOKEN), "content-type": "application/x-www-form-urlencoded"}, body});
+  const base = (env.TWILIO_API_BASE || "https://api.twilio.com").replace(/\/$/, "");
+  const url = base + "/2010-04-01/Accounts/" + env.TWILIO_ACCOUNT_SID + "/Messages.json";
+  const params = {To: normalizePhone(m.to_addr), Body: m.body};
+  if (env.TWILIO_MESSAGING_SERVICE_SID) params.MessagingServiceSid = env.TWILIO_MESSAGING_SERVICE_SID; else params.From = env.TWILIO_FROM;
+  if (env.PUBLIC_URL && /^https:/.test(env.PUBLIC_URL)) params.StatusCallback = env.PUBLIC_URL.replace(/\/$/, "") + "/api/hooks/twilio/status";
+  const res = await fetch(url, {method: "POST", headers: {"authorization": "Basic " + btoa(env.TWILIO_ACCOUNT_SID + ":" + env.TWILIO_AUTH_TOKEN), "content-type": "application/x-www-form-urlencoded"}, body: new URLSearchParams(params)});
   const t = await res.text();
   if (!res.ok) throw new Error("Twilio " + res.status + ": " + t.slice(0, 300));
   try { return JSON.parse(t).sid || ""; } catch (e) { return ""; }
 }
 function normalizePhone(p) { const d = String(p || "").replace(/\D/g, ""); if (d.length === 10) return "+1" + d; if (d.length === 11 && d[0] === "1") return "+" + d; return String(p || ""); }
+async function isOptedOut(env, channel, addr) {
+  const key = channel === "sms" ? normalizePhone(addr) : String(addr || "").toLowerCase();
+  return !!(await env.DB.prepare("SELECT 1 FROM optouts WHERE addr=? AND channel=?").bind(key, channel).first());
+}
 async function dispatch(env, limit = 20) {
   const pv = providers(env), emailOn = pv.email, smsOn = pv.sms;
   if (!emailOn && !smsOn) return 0;
@@ -382,31 +434,153 @@ async function dispatch(env, limit = 20) {
   let n = 0;
   for (const m of rows) {
     if ((m.channel === "email" && !emailOn) || (m.channel === "sms" && !smsOn)) continue;
+    // claim the row first, so two dispatchers running at once (a request and the cron) never send the same message twice
+    const claim = await env.DB.prepare("UPDATE messages SET status='sending', attempts=attempts+1 WHERE id=? AND status='queued'").bind(m.id).run();
+    if (!claim.meta || claim.meta.changes !== 1) continue;
     try {
+      if (await isOptedOut(env, m.channel, m.to_addr)) {
+        await env.DB.prepare("UPDATE messages SET status='optout', last_error='Recipient opted out (STOP)' WHERE id=?").bind(m.id).run();
+        continue;
+      }
       const pid = m.channel === "email" ? await sendEmail(env, m) : await sendSms(env, m);
-      await env.DB.prepare("UPDATE messages SET status='sent', sent_at=?, provider_id=?, attempts=attempts+1, last_error=NULL WHERE id=?").bind(nowISO(), pid, m.id).run(); n++;
+      await env.DB.prepare("UPDATE messages SET status='sent', sent_at=?, provider_id=?, last_error=NULL WHERE id=?").bind(nowISO(), pid, m.id).run(); n++;
     } catch (e) {
       const final = m.attempts + 1 >= 6;
-      await env.DB.prepare("UPDATE messages SET status=?, attempts=attempts+1, last_error=? WHERE id=?").bind(final ? "failed" : "queued", s(e.message, 400), m.id).run();
+      await env.DB.prepare("UPDATE messages SET status=?, last_error=? WHERE id=?").bind(final ? "failed" : "queued", s(e.message, 400), m.id).run();
     }
   }
   return n;
 }
+/* Mail that belongs to no order: invitations, password resets, feedback copies, delivery tests. */
+async function queueSystemMail(env, ctx, m) {
+  const pv = providers(env);
+  const status = env.DEMO ? "demo" : (pv.email ? "queued" : "manual");
+  const id = uid("m");
+  await env.DB.prepare("INSERT INTO messages (id,order_id,created_at,channel,party,to_name,to_addr,subject,body,template,status,attempts,kind) VALUES (?,'',?,'email','system',?,?,?,?,?,?,0,'system')")
+    .bind(id, nowISO(), s(m.to_name, 120), s(m.to_addr, 120).toLowerCase(), s(m.subject, 200), String(m.body), s(m.template, 40), status).run();
+  if (status === "queued" && ctx) ctx.waitUntil(dispatch(env, 8));
+  return {id, status};
+}
+async function inviteMail(env, ctx, req, target, by, link) {
+  const brand = await loadBrand(env), roleName = (CORE.ROLES[target.role] || {}).name || target.role;
+  return queueSystemMail(env, ctx, {to_name: target.name, to_addr: target.email, template: "invite",
+    subject: "Your " + brand.name + " Appraisal Desk sign-in",
+    body: by.name + " has added you to the " + brand.name + " Appraisal Desk as " + roleName + ". Choose your password and sign in here within " + INVITE_DAYS + " days: " + link +
+      "\n\nThe link works once. If it expires, ask " + by.name + " for a new one." + (brand.supportLine ? "\n\n" + brand.supportLine : "")});
+}
+/* Twilio signs every webhook: HMAC-SHA1 over the exact URL plus the sorted POST fields, base64. */
+async function twilioSignatureOk(env, req, params) {
+  const sig = req.headers.get("x-twilio-signature") || "";
+  if (!sig || !env.TWILIO_AUTH_TOKEN) return false;
+  const u = new URL(req.url);
+  const base = (env.PUBLIC_URL || u.origin).replace(/\/$/, "") + u.pathname + u.search;
+  const keys = [...params.keys()].sort();
+  let data = base; for (const k of keys) data += k + params.get(k);
+  const key = await crypto.subtle.importKey("raw", enc.encode(env.TWILIO_AUTH_TOKEN), {name: "HMAC", hash: "SHA-1"}, false, ["sign"]);
+  const mac = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(data)))));
+  return safeEqual(mac, sig);
+}
+/* Find the open order a client reply belongs to: the newest one whose borrower or agent has that phone or email. */
+async function orderForContact(env, channel, addr) {
+  const rows = (await env.DB.prepare("SELECT * FROM orders WHERE cancelled=0 AND declined=0 AND step<7 ORDER BY updated_at DESC LIMIT 400").all()).results || [];
+  const want = channel === "sms" ? normalizePhone(addr) : String(addr || "").toLowerCase();
+  for (const r of rows) {
+    const o = rowToOrder(r);
+    if (channel === "sms") { if (normalizePhone(o.borrowerPhone) === want) return {o, party: "borrower"}; if (o.agentPhone && normalizePhone(o.agentPhone) === want) return {o, party: "agent"}; }
+    else { if (o.borrowerEmail === want) return {o, party: "borrower"}; if (o.agentEmail && o.agentEmail === want) return {o, party: "agent"}; }
+  }
+  return null;
+}
+/* Strip the quoted history a mail client appends below a reply. */
+function replyText(t) {
+  const lines = String(t || "").replace(/\r/g, "").split("\n"), out = [];
+  for (const ln of lines) {
+    if (/^On .{6,120} wrote:\s*$/.test(ln) || /^-{2,}\s*Original Message\s*-{2,}/i.test(ln) || /^From:\s.+/.test(ln) && out.length) break;
+    if (/^>/.test(ln)) continue;
+    out.push(ln);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
+}
+/* Record an inbound reply and route it: a matched client goes on the order's conversation; staff by email goes on too. */
+async function handleInbound(env, base, ctx, inb) {
+  const id = uid("i");
+  let orderId = inb.orderId || "", handled = "";
+  const addr = inb.channel === "sms" ? normalizePhone(inb.from) : String(inb.from || "").toLowerCase();
+  const text = inb.channel === "sms" ? s(inb.body, 2000) : replyText(inb.body);
+  try {
+    let o = null, party = "";
+    if (orderId) { const row = await getOrderRow(env, orderId); if (row) o = rowToOrder(row); }
+    if (o) {
+      if (inb.channel === "sms") { if (normalizePhone(o.borrowerPhone) === addr) party = "borrower"; else if (o.agentPhone && normalizePhone(o.agentPhone) === addr) party = "agent"; }
+      else { if (o.borrowerEmail === addr) party = "borrower"; else if (o.agentEmail && o.agentEmail === addr) party = "agent"; }
+    }
+    if (!o || !party) { const m = await orderForContact(env, inb.channel, inb.from); if (m) { o = m.o; party = m.party; } }
+    if (o && party) {
+      orderId = o.id;
+      if (text) {
+        const actor = {name: party === "agent" ? (o.agentName || "Agent") : (o.borrowerName || "Borrower"), role: "client"};
+        await runAction(env, base, ctx, o.id, "post", {text, via: inb.channel === "sms" ? "text message" : "email"}, actor);
+        handled = "posted";
+      } else handled = "empty";
+    } else if (inb.channel === "email") {
+      // a staff member replying by email lands on the order too, when the tag named one
+      const u = await env.DB.prepare("SELECT id,name,role FROM users WHERE email=? AND active=1").bind(addr).first();
+      if (u && orderId && text && CORE.can(u.role, "post")) { await runAction(env, base, ctx, orderId, "post", {text, via: "email"}, {name: u.name, role: u.role, id: u.id}); handled = "posted"; }
+      else handled = "unmatched";
+    } else handled = "unmatched";
+  } catch (e) { handled = "error: " + s(e.message, 200); }
+  await env.DB.prepare("INSERT INTO inbound (id,at,channel,from_addr,from_name,order_id,subject,body,provider_id,handled) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    .bind(id, nowISO(), inb.channel, s(addr, 160), s(inb.fromName, 120), orderId, s(inb.subject, 200), text || s(inb.body, 4000), s(inb.providerId, 120), handled).run();
+  return {id, orderId, handled};
+}
 
 /* ---------- documents ---------- */
-function store(env) {
-  if (env.BUCKET) return {
-    kind: "r2",
-    put: (key, buf, type) => env.BUCKET.put(key, buf, {httpMetadata: {contentType: type}}),
-    get: async key => { const obj = await env.BUCKET.get(key); return obj ? obj.body : null; },
-    del: key => env.BUCKET.delete(key)
-  };
+/* New uploads go to R2 when a bucket is bound, otherwise KV. Reads follow the storage recorded on the document,
+   so switching a lender to R2 later leaves earlier files readable. */
+function store(env, kind) {
+  const useR2 = kind ? kind === "r2" : !!env.BUCKET;
+  if (useR2) {
+    if (!env.BUCKET) throw new ApiError(500, "storage", "This document is in R2 but no bucket is bound.");
+    return {
+      kind: "r2",
+      put: (key, buf, type) => env.BUCKET.put(key, buf, {httpMetadata: {contentType: type}}),
+      get: async key => { const obj = await env.BUCKET.get(key); return obj ? obj.body : null; },
+      del: key => env.BUCKET.delete(key)
+    };
+  }
   return {
     kind: "kv",
     put: (key, buf, type) => env.FILES.put(key, buf, {metadata: {type}}),
     get: key => env.FILES.get(key, "stream"),
     del: key => env.FILES.delete(key)
   };
+}
+/* The extension decides the type; the first bytes must agree for binary formats, so a renamed file is refused. */
+function sniffOk(ext, buf) {
+  const b = new Uint8Array(buf.slice(0, 16)), at = (i, str) => [...str].every((c, j) => b[i + j] === c.charCodeAt(0));
+  switch (ext) {
+    case "pdf": return at(0, "%PDF");
+    case "png": return b[0] === 0x89 && at(1, "PNG");
+    case "jpg": case "jpeg": return b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+    case "webp": return at(0, "RIFF") && at(8, "WEBP");
+    case "heic": return at(4, "ftyp");
+    case "zip": case "docx": case "xlsx": return at(0, "PK");
+    default: return true; // text formats
+  }
+}
+/* Validate and persist one uploaded file, then record it. Shared by staff and client uploads. */
+async function saveUpload(env, o, f, kind, visible, who, role) {
+  const ext = (f.name.split(".").pop() || "").toLowerCase(), type = TYPES[ext];
+  if (!type) throw bad(f.name + " is not a supported file type (PDF, images, XML, CSV, Office files, ZIP).");
+  if (f.size > MAX_FILE) throw bad(f.name + " is over the 20 MB limit.");
+  if (!f.size) throw bad(f.name + " is empty.");
+  const buf = await f.arrayBuffer();
+  if (!sniffOk(ext, buf)) throw bad(f.name + " does not look like a " + ext.toUpperCase() + " file.");
+  const st = store(env), did = uid("d"), key = "doc/" + o.id + "/" + did;
+  await st.put(key, buf, type);
+  await env.DB.prepare("INSERT INTO docs (id,order_id,name,size,type,kind,client_visible,storage,key,uploaded_by,uploaded_role,uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+    .bind(did, o.id, s(f.name, 200), f.size, type, kind, visible ? 1 : 0, st.kind, key, who, role, nowISO()).run();
+  return did;
 }
 function contentDisposition(name) {
   const ascii = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
@@ -461,15 +635,38 @@ const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 async function api(req, env, ctx) {
   const url = new URL(req.url), path = url.pathname.replace(/\/+$/, ""), method = req.method;
   const seg = path.split("/").filter(Boolean); // ["api", ...]
+  const p = (i) => seg[i] || "";
+  /* --- provider webhooks: authenticated by the provider's signature, not by a session --- */
+  if (p(1) === "hooks") return hooks(req, env, ctx, p);
   if (MUTATING.has(method)) {
     // same-origin only: browsers always send Origin on these methods; the custom header defeats form posts
     const origin = req.headers.get("origin");
     if (origin && origin !== url.origin) throw denied("Cross-site request refused.");
     if (req.headers.get("x-requested-with") !== "FSB") throw denied("Missing request header.");
   }
-  const p = (i) => seg[i] || "";
 
   if (path === "/api/health") return json({ok: true, time: nowISO()});
+
+  /* --- forgotten password: always answers the same way, so it reveals nothing about who has an account --- */
+  if (path === "/api/reset" && method === "POST") {
+    requireSecret(env);
+    const b = await readJSON(req);
+    const email = s(b.email, 120).toLowerCase();
+    if (!emailOk(email)) throw bad("Enter your work email.");
+    if (await limited(env, "reset:ip:" + ip(req), 10, 60 * 60e3) || await limited(env, "reset:em:" + email, 3, 60 * 60e3)) throw new ApiError(429, "rate", "Too many reset requests. Wait an hour, or ask your administrator for a new sign-in link.");
+    const u = await env.DB.prepare("SELECT id,name,email,active FROM users WHERE email=?").bind(email).first();
+    if (u && u.active && providers(env).email && !env.DEMO) {
+      const code = randomToken(28), brand = await loadBrand(env);
+      await env.DB.batch([
+        env.DB.prepare("UPDATE invites SET used_at=? WHERE user_id=? AND used_at IS NULL AND kind='reset'").bind(nowISO(), u.id),
+        env.DB.prepare("INSERT INTO invites (code_hash,user_id,created_by,created_at,expires_at,kind) VALUES (?,?,?,?,?,'reset')").bind(await sha256(code), u.id, "self-service", nowISO(), new Date(Date.now() + 2 * 3600e3).toISOString()),
+        env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), u.name, "Requested a password reset link.")
+      ]);
+      await queueSystemMail(env, ctx, {to_name: u.name, to_addr: u.email, subject: "Reset your " + brand.name + " Appraisal Desk password", template: "reset",
+        body: "Someone asked to reset the password for " + u.email + " on the " + brand.name + " Appraisal Desk. If that was you, choose a new password here within two hours: " + publicUrl(env, req) + "/#invite=" + code + "\n\nIf it was not you, ignore this message; your password has not changed."});
+    }
+    return json({ok: true, message: "If that address has an active account, a reset link is on its way. It lasts two hours."});
+  }
 
   /* --- client (token) endpoints, no session --- */
   if (p(1) === "client" && p(2)) {
@@ -491,7 +688,9 @@ async function api(req, env, ctx) {
         slots: o.step === 2 && !o.hold && !o.cancelled ? CORE.genSlots(cfg, booked, Date.now(), 24) : [],
         report: report || null, consent: !!(o.consent && o.consent[party]), tz: cfg.timeZone || CORE.TZ,
         lender: {name: cfg.lenderName, tagline: cfg.brand.tagline || "", logo: cfg.brand.logoKey ? "/brand/logo?v=" + (cfg.brand.logoVersion || 1) : cfg.brand.logo, primary: cfg.brand.primary, accent: cfg.brand.accent},
-        docRequest: o.docRequest && CORE.isOpen(o) ? o.docRequest.items : "", uploaded
+        docRequest: o.docRequest && CORE.isOpen(o) ? o.docRequest.items : "", uploaded,
+        thread: (o.thread || []).filter(t => t.role === "client" || t.to === "client").map(t => ({at: t.at, who: t.who, mine: t.role === "client" && t.who === actor.name, text: t.text, via: t.via || "portal"})).slice(-50),
+        open: CORE.isOpen(o)
       });
     }
     if (method === "POST" && p(3) === "docs") {
@@ -500,18 +699,18 @@ async function api(req, env, ctx) {
       const form = await req.formData();
       const files = form.getAll("file").filter(f => f && typeof f === "object" && f.size !== undefined);
       if (!files.length) throw bad("No file was received.");
-      const st = store(env);
       for (const f of files) {
-        const ext = (f.name.split(".").pop() || "").toLowerCase(), type = TYPES[ext];
-        if (!type) throw bad(f.name + " is not a supported file type (PDF, images, Office files).");
-        if (f.size > MAX_FILE) throw bad(f.name + " is over the 20 MB limit."); if (!f.size) throw bad(f.name + " is empty.");
-        const did = uid("d"), key = "doc/" + o.id + "/" + did;
-        await st.put(key, await f.arrayBuffer(), type);
-        await env.DB.prepare("INSERT INTO docs (id,order_id,name,size,type,kind,client_visible,storage,key,uploaded_by,uploaded_role,uploaded_at) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)")
-          .bind(did, o.id, s(f.name, 200), f.size, type, "other", st.kind, key, actor.name, "client", nowISO()).run();
+        await saveUpload(env, o, f, "other", false, actor.name, "client");
         await runAction(env, publicUrl(env, req), ctx, o.id, "clientdoc", {name: f.name}, actor);
       }
       return json({ok: true, reply: files.length + " file" + (files.length === 1 ? "" : "s") + " received. Thank you."});
+    }
+    if (method === "POST" && p(3) === "message") {
+      if (!CORE.isOpen(o)) throw bad("This file is closed.");
+      if (await limited(env, "cmsg:" + tok, 40, 24 * 3600e3)) throw new ApiError(429, "rate", "Message limit reached for today. Please call instead.");
+      const body = await readJSON(req);
+      const r = await runAction(env, publicUrl(env, req), ctx, o.id, "post", {text: s(body.text, 2000)}, actor);
+      return json({ok: true, reply: "Sent. " + (cfg.appraiserName || "The appraiser") + " and your lender have been notified."});
     }
     if (method === "GET" && p(3) === "appointment.ics") {
       if (!o.apptStart) throw notFound("No appointment is booked.");
@@ -568,20 +767,20 @@ async function api(req, env, ctx) {
     requireSecret(env);
     if (await limited(env, "invite:" + ip(req), 30, 15 * 60e3)) throw new ApiError(429, "rate", "Too many attempts. Wait 15 minutes.");
     if (method === "GET" && p(2)) {
-      const inv = await env.DB.prepare("SELECT i.expires_at,i.used_at,u.name,u.email,u.role,u.active FROM invites i JOIN users u ON u.id=i.user_id WHERE i.code_hash=?").bind(await sha256(s(p(2), 60))).first();
-      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This invitation is not valid any more. Ask the lender's administrator for a new one.");
-      return json({name: inv.name, email: inv.email, role: inv.role});
+      const inv = await env.DB.prepare("SELECT i.expires_at,i.used_at,i.kind,u.name,u.email,u.role,u.active FROM invites i JOIN users u ON u.id=i.user_id WHERE i.code_hash=?").bind(await sha256(s(p(2), 60))).first();
+      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This link is not valid any more. Ask the lender's administrator for a new one, or request a new reset link from the sign-in page.");
+      return json({name: inv.name, email: inv.email, role: inv.role, kind: inv.kind || "invite"});
     }
     if (method === "POST" && p(2) === "accept") {
       const b = await readJSON(req);
       const h = await sha256(s(b.code, 60));
-      const inv = await env.DB.prepare("SELECT i.user_id,i.expires_at,i.used_at,u.active,u.name FROM invites i JOIN users u ON u.id=i.user_id WHERE i.code_hash=?").bind(h).first();
-      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This invitation is not valid any more. Ask the lender's administrator for a new one.");
+      const inv = await env.DB.prepare("SELECT i.user_id,i.expires_at,i.used_at,i.kind,u.active,u.name FROM invites i JOIN users u ON u.id=i.user_id WHERE i.code_hash=?").bind(h).first();
+      if (!inv || inv.used_at || inv.expires_at < nowISO() || !inv.active) throw notFound("This link is not valid any more. Ask the lender's administrator for a new one, or request a new reset link from the sign-in page.");
       await setPassword(env, inv.user_id, b.password);
       await env.DB.batch([
         env.DB.prepare("UPDATE invites SET used_at=? WHERE code_hash=?").bind(nowISO(), h),
         env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(inv.user_id),
-        env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), inv.name, "Accepted invitation and set a password.")
+        env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), inv.name, inv.kind === "reset" ? "Reset their password from an emailed link." : "Accepted invitation and set a password.")
       ]);
       const u = await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(inv.user_id).first();
       const cookie = await startSession(env, req, u.id);
@@ -601,7 +800,38 @@ async function api(req, env, ctx) {
     const h = await pbkdf2(String(b.current || ""), u.pw_salt, u.pw_iter, env.AUTH_SECRET);
     if (!safeEqual(h, u.pw_hash)) throw new ApiError(401, "auth", "Your current password is wrong.");
     await setPassword(env, user.id, b.next);
+    // every other device is signed out; this one keeps its session
+    const mine = await sha256(getCookie(req, COOKIE) || "");
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM sessions WHERE user_id=? AND id_hash<>?").bind(user.id, mine),
+      env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), user.name, "Changed their password; other sessions signed out.")
+    ]);
     return json({ok: true});
+  }
+  /* --- delivery check: the administrator sends a test to their own address and sees the provider's answer --- */
+  if (path === "/api/test-send" && method === "POST") {
+    if (role !== "admin") throw denied("Only the administrator runs delivery tests.");
+    const b = await readJSON(req), channel = b.channel === "sms" ? "sms" : "email";
+    if (env.DEMO) throw bad("The demonstration copy never sends anything.");
+    const pv = providers(env);
+    if (channel === "email" && !pv.email) throw bad("No email provider is configured on the server yet.");
+    if (channel === "sms" && !pv.sms) throw bad("No text-message provider is configured on the server yet.");
+    if (await limited(env, "test:" + user.id, 10, 60 * 60e3)) throw new ApiError(429, "rate", "Ten tests an hour is plenty.");
+    const brand = await loadBrand(env);
+    const to_addr = channel === "sms" ? s(b.to || user.phone, 40) : user.email;
+    if (!to_addr) throw bad("Add a mobile number to your account first (People, your row).");
+    const m = {id: uid("m"), order_id: "", to_name: user.name, to_addr, subject: brand.name + " Appraisal Desk: test message",
+      body: channel === "sms" ? brand.name + " Appraisal Desk test: text delivery works. Reply STOP to opt out." : "This is a delivery test sent by " + user.name + " from the " + brand.name + " Appraisal Desk at " + nowISO() + ".\n\nIf you are reading it, email delivery works: " + publicUrl(env, req)};
+    await env.DB.prepare("INSERT INTO messages (id,order_id,created_at,channel,party,to_name,to_addr,subject,body,template,status,attempts,kind) VALUES (?,'',?,?,'system',?,?,?,?,'test','queued',0,'system')")
+      .bind(m.id, nowISO(), channel, m.to_name, m.to_addr, channel === "sms" ? "" : m.subject, m.body).run();
+    try {
+      const pid = channel === "email" ? await sendEmail(env, m) : await sendSms(env, m);
+      await env.DB.prepare("UPDATE messages SET status='sent', sent_at=?, provider_id=?, attempts=1 WHERE id=?").bind(nowISO(), pid, m.id).run();
+      return json({ok: true, via: channel === "email" ? pv.emailVia : pv.smsVia, to: to_addr, providerId: pid});
+    } catch (e) {
+      await env.DB.prepare("UPDATE messages SET status='failed', attempts=1, last_error=? WHERE id=?").bind(s(e.message, 400), m.id).run();
+      throw new ApiError(502, "provider", "The provider refused it: " + s(e.message, 300));
+    }
   }
 
   /* --- brand (admin) --- */
@@ -658,7 +888,9 @@ async function api(req, env, ctx) {
         env.DB.prepare("INSERT INTO invites (code_hash,user_id,created_by,created_at,expires_at) VALUES (?,?,?,?,?)").bind(await sha256(code), id, user.name, nowISO(), new Date(Date.now() + INVITE_DAYS * 864e5).toISOString()),
         env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), user.name, "Added " + name + " (" + email + ") as " + CORE.ROLES[r].name + ".")
       ]);
-      return json({ok: true, id, inviteLink: publicUrl(env, req) + "/#invite=" + code, expiresDays: INVITE_DAYS});
+      const link = publicUrl(env, req) + "/#invite=" + code;
+      const mail = await inviteMail(env, ctx, req, {name, email, role: r}, user, link);
+      return json({ok: true, id, inviteLink: link, expiresDays: INVITE_DAYS, emailed: mail.status === "queued"});
     }
     if (p(2) && method === "PATCH") {
       const target = await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(p(2)).first();
@@ -689,7 +921,9 @@ async function api(req, env, ctx) {
         env.DB.prepare("INSERT INTO invites (code_hash,user_id,created_by,created_at,expires_at) VALUES (?,?,?,?,?)").bind(await sha256(code), target.id, user.name, nowISO(), new Date(Date.now() + INVITE_DAYS * 864e5).toISOString()),
         env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), user.name, "Issued a new sign-in link for " + target.name + ".")
       ]);
-      return json({ok: true, inviteLink: publicUrl(env, req) + "/#invite=" + code, expiresDays: INVITE_DAYS});
+      const link = publicUrl(env, req) + "/#invite=" + code;
+      const mail = await inviteMail(env, ctx, req, target, user, link);
+      return json({ok: true, inviteLink: link, expiresDays: INVITE_DAYS, emailed: mail.status === "queued"});
     }
     throw notFound();
   }
@@ -725,19 +959,31 @@ async function api(req, env, ctx) {
     if (method === "POST") {
       const b = await readJSON(req); const text = s(b.text, 4000);
       if (!text) throw bad("Write a note first.");
-      await env.DB.prepare("INSERT INTO feedback (id,at,who,role,kind,screen,order_ref,text) VALUES (?,?,?,?,?,?,?,?)").bind(uid("f"), nowISO(), user.name, role, s(b.kind, 40) || "Note", s(b.screen, 40), s(b.order, 120), text).run();
-      return json({ok: true});
+      const kind = s(b.kind, 40) || "Note";
+      await env.DB.prepare("INSERT INTO feedback (id,at,who,role,kind,screen,order_ref,text) VALUES (?,?,?,?,?,?,?,?)").bind(uid("f"), nowISO(), user.name, role, kind, s(b.screen, 40), s(b.order, 120), text).run();
+      // the vendor and the lender's administrators hear about it the same minute
+      const brand = await loadBrand(env);
+      const admins = (await env.DB.prepare("SELECT name,email FROM users WHERE role='admin' AND active=1 AND id<>?").bind(user.id).all()).results || [];
+      const to = [...admins]; if (env.VENDOR_EMAIL && emailOk(env.VENDOR_EMAIL)) to.push({name: "Vendor", email: env.VENDOR_EMAIL});
+      const body = kind + " from " + user.name + " (" + CORE.ROLES[role].name + ") on the " + brand.name + " Appraisal Desk" + (b.screen ? ", screen: " + s(b.screen, 40) : "") + (b.order ? ", order: " + s(b.order, 120) : "") + "\n\n" + text + "\n\nAll feedback: " + publicUrl(env, req) + "/#v=feedback";
+      let n = 0; for (const t of to) { const r = await queueSystemMail(env, ctx, {to_name: t.name, to_addr: t.email, subject: "Portal feedback: " + kind + " from " + user.name, template: "feedback", body}); if (r.status === "queued") n++; }
+      return json({ok: true, notified: n});
     }
+  }
+  /* --- inbound replies that could not be matched to an order (desk and admin) --- */
+  if (path === "/api/inbound" && method === "GET") {
+    if (!CORE.can(role, "outbox")) throw denied();
+    return json({inbound: (await env.DB.prepare("SELECT id,at,channel,from_addr,from_name,order_id,subject,body,handled FROM inbound ORDER BY at DESC LIMIT 200").all()).results || []});
   }
 
   /* --- outbox --- */
   if (p(1) === "messages") {
     if (method === "GET" && !p(2)) {
       const st = url.searchParams.get("status");
-      const q = st ? env.DB.prepare("SELECT m.*, o.data FROM messages m JOIN orders o ON o.id=m.order_id WHERE m.status=? ORDER BY m.created_at DESC LIMIT 300").bind(st)
-                   : env.DB.prepare("SELECT m.*, o.data FROM messages m JOIN orders o ON o.id=m.order_id ORDER BY m.created_at DESC LIMIT 300");
+      const q = st ? env.DB.prepare("SELECT m.*, o.data FROM messages m LEFT JOIN orders o ON o.id=m.order_id WHERE m.status=? ORDER BY m.created_at DESC LIMIT 300").bind(st)
+                   : env.DB.prepare("SELECT m.*, o.data FROM messages m LEFT JOIN orders o ON o.id=m.order_id ORDER BY m.created_at DESC LIMIT 300");
       const rows = (await q.all()).results || [];
-      return json({messages: rows.map(r => { let addr = ""; try { const d = JSON.parse(r.data); addr = d.addr; } catch (e) {} const {data, ...m} = r; m.order_addr = addr; return m; })});
+      return json({messages: rows.map(r => { let addr = ""; try { const d = JSON.parse(r.data); addr = d.addr; } catch (e) {} const {data, ...m} = r; m.order_addr = addr || (m.kind === "system" ? "System" : ""); return m; })});
     }
     if (p(2) && method === "POST" && p(3) === "mark") {
       if (!CORE.can(role, "outbox")) throw denied();
@@ -797,16 +1043,9 @@ async function api(req, env, ctx) {
         const visible = form.get("clientVisible") === "1" || (CORE.DOC_KINDS[kind].client && role === "appraiser");
         const files = form.getAll("file").filter(f => f && typeof f === "object" && f.size !== undefined);
         if (!files.length) throw bad("No file was received.");
-        const st = store(env), added = [], events = [];
+        const added = [], events = [];
         for (const f of files) {
-          const ext = (f.name.split(".").pop() || "").toLowerCase(), type = TYPES[ext];
-          if (!type) throw bad(f.name + " is not a supported file type (PDF, images, XML, CSV, Office files, ZIP).");
-          if (f.size > MAX_FILE) throw bad(f.name + " is over the 20 MB limit.");
-          if (!f.size) throw bad(f.name + " is empty.");
-          const did = uid("d"), key = "doc/" + o.id + "/" + did;
-          await st.put(key, await f.arrayBuffer(), type);
-          await env.DB.prepare("INSERT INTO docs (id,order_id,name,size,type,kind,client_visible,storage,key,uploaded_by,uploaded_role,uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-            .bind(did, o.id, s(f.name, 200), f.size, type, kind, visible ? 1 : 0, st.kind, key, user.name, role, nowISO()).run();
+          const did = await saveUpload(env, o, f, kind, visible, user.name, role);
           added.push(did); events.push({at: nowISO(), who: user.name, role, what: "Uploaded " + f.name + " (" + CORE.DOC_KINDS[kind].name + ", " + f.size + " bytes" + (visible ? ", visible to the client" : "") + ")."});
         }
         await writeEvents(env, o.id, events);
@@ -843,6 +1082,43 @@ async function api(req, env, ctx) {
   throw notFound("No such API route.");
 }
 
+/* ---------- provider webhooks ---------- */
+const twiml = () => new Response("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response></Response>", {headers: {"content-type": "text/xml"}});
+async function hooks(req, env, ctx, p) {
+  if (req.method !== "POST") throw notFound();
+  if (p(2) === "twilio" && (p(3) === "status" || p(3) === "inbound")) {
+    const params = new URLSearchParams(await req.text());
+    if (!(await twilioSignatureOk(env, req, params))) throw denied("Bad Twilio signature.");
+    if (p(3) === "status") {
+      const sid = s(params.get("MessageSid") || params.get("SmsSid"), 60), status = s(params.get("MessageStatus") || params.get("SmsStatus"), 30).toLowerCase();
+      const err = s(params.get("ErrorCode"), 20);
+      if (sid && status) {
+        const m = await env.DB.prepare("SELECT id,order_id,to_name,delivery FROM messages WHERE provider_id=?").bind(sid).first();
+        if (m) {
+          await env.DB.prepare("UPDATE messages SET delivery=?, delivery_at=?, last_error=? WHERE id=?").bind(status + (err ? " (" + err + ")" : ""), nowISO(), ["undelivered", "failed"].includes(status) ? "Carrier reported " + status + (err ? ", code " + err : "") : null, m.id).run();
+          if (["undelivered", "failed"].includes(status) && m.order_id) await writeEvents(env, m.order_id, [{at: nowISO(), who: "Carrier", role: "system", what: "Text to " + m.to_name + " was " + status + (err ? " (Twilio error " + err + ")" : "") + ". Call them instead."}]);
+        }
+      }
+      return twiml();
+    }
+    const from = s(params.get("From"), 40), body = s(params.get("Body"), 2000), sid = s(params.get("MessageSid"), 60);
+    const word = body.trim().toUpperCase();
+    if (/^(STOP|STOPALL|UNSUBSCRIBE|CANCEL|END|QUIT)$/.test(word)) {
+      await env.DB.prepare("INSERT INTO optouts (addr,channel,at,source) VALUES (?,'sms',?,'STOP by text') ON CONFLICT(addr) DO UPDATE SET at=excluded.at, source=excluded.source").bind(normalizePhone(from), nowISO()).run();
+      await env.DB.prepare("INSERT INTO inbound (id,at,channel,from_addr,order_id,body,provider_id,handled) VALUES (?,?,'sms',?,'',?,?,'optout')").bind(uid("i"), nowISO(), normalizePhone(from), body, sid).run();
+      return twiml();
+    }
+    if (/^(START|UNSTOP|YES)$/.test(word)) {
+      await env.DB.prepare("DELETE FROM optouts WHERE addr=? AND channel='sms'").bind(normalizePhone(from)).run();
+      await env.DB.prepare("INSERT INTO inbound (id,at,channel,from_addr,order_id,body,provider_id,handled) VALUES (?,?,'sms',?,'',?,?,'optin')").bind(uid("i"), nowISO(), normalizePhone(from), body, sid).run();
+      return twiml();
+    }
+    await handleInbound(env, (env.PUBLIC_URL || new URL(req.url).origin).replace(/\/$/, ""), ctx, {channel: "sms", from, body, providerId: sid});
+    return twiml();
+  }
+  throw notFound();
+}
+
 /* ---------- file download: /f/<orderId>/<docId>[?t=token] ---------- */
 async function fileRoute(req, env) {
   const url = new URL(req.url), m = /^\/f\/([a-z0-9]+)\/([a-z0-9]+)$/i.exec(url.pathname);
@@ -862,10 +1138,13 @@ async function fileRoute(req, env) {
     const user = await currentUser(env, req);
     if (!user) throw new ApiError(401, "signin", "Please sign in.");
     if (user.role === "officer" && !["report", "addendum", "invoice"].includes(d.kind)) throw denied("Loan officers can open the finished report and invoice only.");
+    // downloads of the other side's documents go on the record (an appraiser opening their own report does not)
+    if (user.role !== d.uploaded_role) await writeEvents(env, d.order_id, [{at: nowISO(), who: user.name, role: user.role, what: "Downloaded " + d.name + "."}]);
   }
-  const body = await store(env).get(d.key);
+  const body = await store(env, d.storage).get(d.key);
   if (!body) throw notFound("The file bytes are missing from storage.");
-  return new Response(body, {headers: {"content-type": d.type, "content-disposition": contentDisposition(d.name), "cache-control": "private, no-store", "x-content-type-options": "nosniff"}});
+  return new Response(body, {headers: {"content-type": d.type, "content-disposition": contentDisposition(d.name), "cache-control": "private, no-store", "x-content-type-options": "nosniff",
+    "content-security-policy": "sandbox; default-src 'none'", "x-frame-options": "DENY", "referrer-policy": "no-referrer"}});
 }
 
 const SEC = {
@@ -898,9 +1177,38 @@ export default {
       return json({error: "server", message: "Something went wrong on the server. " + (env.DEBUG ? String(e && e.message) : "Try again.")}, 500);
     }
   },
+  /* Inbound mail (Cloudflare Email Routing -> this Worker). Replies to desk+<orderId>@domain land on that order's
+     conversation; anything else is matched by the sender's address; the rest waits on the Outbox screen. */
+  async email(message, env, ctx) {
+    const base = (env.PUBLIC_URL || "").replace(/\/$/, "");
+    let parsed;
+    try { parsed = await PostalMime.parse(message.raw); } catch (e) { parsed = {}; }
+    const to = String(message.to || "").toLowerCase();
+    const tag = /\+([a-z0-9]+)@/i.exec(to);
+    const fromAddr = (parsed.from && parsed.from.address) || String(message.from || "");
+    const fromName = (parsed.from && parsed.from.name) || "";
+    const text = parsed.text || (parsed.html ? String(parsed.html).replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/[ \t]+/g, " ").trim() : "");
+    if (env.DEMO) return; // the demonstration copy ignores mail
+    const r = await handleInbound(env, base, ctx, {channel: "email", from: fromAddr, fromName, subject: parsed.subject || "", body: text, providerId: parsed.messageId || "", orderId: tag ? tag[1] : ""});
+    // attachments from a matched client become documents on the order
+    if (r.orderId && r.handled === "posted" && Array.isArray(parsed.attachments)) {
+      const row = await getOrderRow(env, r.orderId); if (!row) return;
+      const o = rowToOrder(row), who = s(fromName || fromAddr, 120);
+      for (const a of parsed.attachments.slice(0, 10)) {
+        const name = s(a.filename || "attachment", 200), buf = a.content instanceof ArrayBuffer ? a.content : (a.content && a.content.buffer) || null;
+        if (!buf || !buf.byteLength) continue;
+        try {
+          const f = {name, size: buf.byteLength, arrayBuffer: async () => buf};
+          await saveUpload(env, o, f, "other", false, who, "client");
+          await writeEvents(env, o.id, [{at: nowISO(), who, role: "client", what: "Attached " + name + " by email (" + buf.byteLength + " bytes)."}]);
+        } catch (e) { await writeEvents(env, o.id, [{at: nowISO(), who, role: "client", what: "Email attachment " + name + " was not kept: " + s(e.message, 200)}]); }
+      }
+    }
+  },
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
       if (env.DEMO && event.cron === "0 8 * * *") { await resetDemo(env, (env.PUBLIC_URL || "").replace(/\/$/, ""), {createOrder, runAction, setPassword, store, writeEvents, uid, randomToken, nowISO}); return; }
+      await env.DB.prepare("UPDATE messages SET status='queued' WHERE status='sending' AND created_at < ?").bind(new Date(Date.now() - 10 * 60e3).toISOString()).run();
       await dispatch(env, 50);
       const d = new Date(); if (d.getUTCHours() === 13 && d.getUTCMinutes() < 5) await runNudges(env, (env.PUBLIC_URL || "").replace(/\/$/, ""));
       await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(nowISO()).run();

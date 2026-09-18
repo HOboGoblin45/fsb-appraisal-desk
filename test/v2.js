@@ -56,7 +56,7 @@ function client() {
   console.log("documents from the client, review, preliminary, revision, payment");
   r = await apr2.post("/api/orders/" + oid + "/actions", {action: "docreq", params: {items: "Current leases and last twelve months of expenses"}}); ok(r.status === 200 && r.data.order.docRequest && r.data.order.messages.some(m => m.template === "docreq" && m.channel === "sms"), "document request sent to the contact");
   r = await anon.get("/api/client/" + tokB); ok(/leases/.test(r.data.docRequest), "client page shows what is needed");
-  const cfd = new FormData(); cfd.append("file", new Blob(["lease"], {type: "application/pdf"}), "lease-unit-1.pdf");
+  const cfd = new FormData(); cfd.append("file", new Blob(["%PDF-1.4\nlease\n%%EOF"], {type: "application/pdf"}), "lease-unit-1.pdf");
   r = await anon.post("/api/client/" + tokB + "/docs", cfd); ok(r.status === 200, "client uploads a document: " + r.data.reply);
   r = await desk.get("/api/orders/" + oid); ok(r.data.order.docs.some(d => d.uploaded_role === "client" && d.name === "lease-unit-1.pdf") && r.data.order.events.some(e => /uploaded lease-unit-1.pdf/.test(e.what)), "upload appears on the order with an event");
   await apr2.post("/api/orders/" + oid + "/actions", {action: "inspect", from: 3});

@@ -43,6 +43,8 @@ function client() {
   r = await who.desk.get("/api/orders/" + byAddr("16 W Elm St").id + "/log.txt"); ok(r.status === 200 && /Downloaded appraisal-16-elm-danvers.pdf/.test(r.data) && /Invoice sent/.test(r.data), "independence record for the completed order reads end to end");
   r = await who.admin.get("/api/users"); ok(r.data.users.length === 4 && r.data.users.every(u => u.has_pw), "four demo accounts with passwords");
   r = await who.desk.get("/api/messages"); ok(r.data.messages.length > 20, "outbox shows the composed messages (" + r.data.messages.length + ")");
-  r = await who.desk.get("/api/orders/" + byAddr("77 Prairie View Dr").id); ok(r.data.order.events.some(e => /Reply from the appraiser/.test(e.what)), "question and reply exchange on the record");
+  r = await who.desk.get("/api/orders/" + byAddr("77 Prairie View Dr").id); ok(r.data.order.events.some(e => /Message from Sam Reynolds \(Appraiser\)/.test(e.what)) && r.data.order.events.some(e => /Message to the client from Sam Reynolds/.test(e.what)) && r.data.order.events.some(e => /Message from Angela Moss \(client, by text message\)/.test(e.what)), "question, reply, note to the client and her text back are on the record");
+  ok((r.data.order.thread || []).length === 4 && r.data.order.thread.some(t => t.role === "client" && t.via === "text message"), "the conversation holds all four entries");
+  r = await anon.get("/api/client/" + r.data.order.tokB); ok(r.status === 200 && r.data.thread.length === 2 && r.data.thread.some(t => t.mine), "the borrower sees the two entries meant for her");
   console.log("\n" + pass + " passed, " + fail + " failed"); process.exit(fail ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(2); });

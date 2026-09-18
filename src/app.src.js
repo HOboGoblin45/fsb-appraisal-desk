@@ -3,7 +3,7 @@
   "use strict";
   var STEPS=CORE.STEPS, ROLES=CORE.ROLES, CLIENT_LABEL=CORE.CLIENT_LABEL, DOC_KINDS=CORE.DOC_KINDS;
   var S = {
-    me:null, view:"board", sel:null, tab:"status", orders:[], detail:{}, config:null, feedback:[], users:[], audit:[], messages:[],
+    me:null, view:"board", sel:null, tab:"status", orders:[], detail:{}, config:null, feedback:[], users:[], audit:[], messages:[], inbound:[],
     busy:false, toastT:null, boot:"loading", bootWhy:"", token:null, client:null, invite:null, inviteCode:null, provisioned:true,
     providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv", demo:false, brand:{name:"Your Lender",tagline:"",primary:"#1f4984",accent:"#790000",logo:"",productName:"Appraisal Desk"}, appraisers:[]
   };
@@ -127,7 +127,7 @@
   }
   function loadUsers(){ if(!S.me||S.me.role!=="admin") return Promise.resolve(); return Promise.all([api("GET","/api/users"),api("GET","/api/audit")]).then(function(r){ S.users=r[0].users; S.audit=r[1].audit||[]; }); }
   function loadFeedback(){ return api("GET","/api/feedback").then(function(d){ S.feedback=d.feedback; }); }
-  function loadMessages(){ var q=S.mfilter==="all"?"":("?status="+S.mfilter); return api("GET","/api/messages"+q).then(function(d){ S.messages=d.messages; }); }
+  function loadMessages(){ var q=S.mfilter==="all"?"":("?status="+S.mfilter); return Promise.all([api("GET","/api/messages"+q),api("GET","/api/inbound").catch(function(){ return {inbound:[]}; })]).then(function(r){ S.messages=r[0].messages; S.inbound=r[1].inbound||[]; }); }
   function poll(){
     if(document.hidden||!S.me||S.token) return;
     loadOrders(false).then(function(n){ if(n) render(); }).catch(function(){});
@@ -177,7 +177,12 @@
     if(o.cancelled) cls="crit"; else if(o.declined) cls="crit"; else if(o.hold) cls="wait"; else if(o.step>=6) cls="ok"; else if(o.step===0) cls="crit";
     return '<span class="pill '+cls+'">'+esc(status(o))+'</span>'+(o.rush&&CORE.isOpen(o)?'<span class="flag">Rush</span>':'');
   }
-  function mpill(st){ var m={sent:"Sent",queued:"Sending",manual:"Needs sending",failed:"Failed",portal:"Seen in portal",demo:"Composed (demo)"}; return '<span class="pill '+esc(st)+'">'+esc(m[st]||st)+'</span>'; }
+  function mpill(st){ var m={sent:"Sent",queued:"Sending",sending:"Sending",manual:"Needs sending",failed:"Failed",portal:"Seen in portal",demo:"Composed (demo)",optout:"Opted out"}; return '<span class="pill '+esc(st)+'">'+esc(m[st]||st)+'</span>'; }
+  function dpill(m){
+    if(!m.delivery||m.status!=="sent") return "";
+    var d=String(m.delivery), bad=/undelivered|failed|bounce/.test(d);
+    return '<span class="pill '+(bad?"crit":(/delivered/.test(d)?"ok":"info"))+'" title="Carrier report'+(m.delivery_at?" "+esc(fmtTime(m.delivery_at)):"")+'">'+esc(bad?"Not delivered":(d.charAt(0).toUpperCase()+d.slice(1)))+'</span>';
+  }
   function timelineHtml(o){
     return '<ul class="tl">'+STEPS.map(function(s,i){
       var cls=i<o.step?"done":(i===o.step?"now":"pend");
@@ -213,7 +218,7 @@
   }
   function msgHtml(m,withOrder){
     var toLine=esc(m.channel==="sms"?"Text":"Email")+" to "+esc(m.to_name)+(m.to_addr?(' <span class="muted">'+esc(m.to_addr)+'</span>'):' <span class="muted">(no '+(m.channel==="sms"?"mobile":"email")+' on file)</span>');
-    return '<div class="msg '+(m.channel==="sms"?"sms":"")+'"><div class="meta"><b>'+toLine+'</b>'+mpill(m.status)+'<span class="sm muted">'+esc(fmtTime(m.created_at))+(m.sent_by?(' &middot; sent by '+esc(m.sent_by)):'')+'</span>'+
+    return '<div class="msg '+(m.channel==="sms"?"sms":"")+'"><div class="meta"><b>'+toLine+'</b>'+mpill(m.status)+dpill(m)+'<span class="sm muted">'+esc(fmtTime(m.created_at))+(m.sent_by?(' &middot; sent by '+esc(m.sent_by)):'')+'</span>'+
       (withOrder&&m.order_addr?('<span class="sm muted">&middot; '+esc(m.order_addr)+'</span>'):'')+'</div>'+
       (m.subject?'<div style="font-weight:600;color:var(--ink);margin-bottom:3px">'+esc(m.subject)+'</div>':'')+
       '<div style="white-space:pre-wrap">'+esc(m.body)+'</div>'+
@@ -251,18 +256,25 @@
       '<label class="f">Work email<input id="si_email" type="email" autocomplete="username" inputmode="email"></label>'+
       '<label class="f">Password<input id="si_pw" type="password" autocomplete="current-password"></label>'+
       '<div><button class="btn btn-p" type="submit" data-a="signin">Sign in</button></div>'+
-      '<p class="sm muted">Forgot your password, or never received an invitation? Ask the portal administrator to issue a new sign-in link.</p>'+
+      (S.providers.email?'<p class="sm muted"><button type="button" class="linkbtn" data-a="forgot">Forgot your password?</button> A reset link goes to your work email. Never received an invitation? Ask the portal administrator.</p>'
+        :'<p class="sm muted">Forgot your password, or never received an invitation? Ask the portal administrator to issue a new sign-in link.</p>')+
       '</form></div></div>'+brandline()+'</div>';
+  }
+  function forgotSheet(){
+    return sheet("Reset your password",'<p class="sm muted">Enter your work email. If it has an active account, a link to choose a new password arrives within a minute and lasts two hours.</p>'+
+      '<label class="f">Work email<input id="fg_email" type="email" autocomplete="username" inputmode="email"></label>',"Send reset link","doforgot");
   }
   function inviteHtml(){
     if(!S.invite) return '<div class="panel"><div class="empty"><b>Checking your invitation</b></div></div>';
     if(S.invite.error) return '<div class="signwrap"><div class="panel"><div class="empty"><b>This invitation is not valid</b>'+esc(S.invite.error)+'<div style="margin-top:10px"><a class="btn btn-s" href="./">Go to sign in</a></div></div></div></div>';
-    return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Welcome, '+esc(S.invite.name)+'</h2>'+
-      '<p class="note">You have been added as <b>'+esc((ROLES[S.invite.role]||{}).name||S.invite.role)+'</b> ('+esc(S.invite.email)+'). '+esc((ROLES[S.invite.role]||{}).hint||"")+'</p></div></div>'+
+    var reset=S.invite.kind==="reset";
+    return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>'+(reset?'Choose a new password':'Welcome, '+esc(S.invite.name))+'</h2>'+
+      (reset?'<p class="note">For '+esc(S.invite.name)+' ('+esc(S.invite.email)+'). Every other device signed in as you is signed out when you continue.</p>'
+        :'<p class="note">You have been added as <b>'+esc((ROLES[S.invite.role]||{}).name||S.invite.role)+'</b> ('+esc(S.invite.email)+'). '+esc((ROLES[S.invite.role]||{}).hint||"")+'</p>')+'</div></div>'+
       '<div class="pb"><form class="stack" id="inviteForm">'+
-      '<label class="f">Choose a password (10 characters or more)<input id="iv_pw" type="password" autocomplete="new-password"></label>'+
+      '<label class="f">'+(reset?'New password':'Choose a password')+' (10 characters or more)<input id="iv_pw" type="password" autocomplete="new-password"></label>'+
       '<label class="f">Type it again<input id="iv_pw2" type="password" autocomplete="new-password"></label>'+
-      '<div><button class="btn btn-p" type="submit" data-a="acceptinvite">Set password and sign in</button></div>'+
+      '<div><button class="btn btn-p" type="submit" data-a="acceptinvite">'+(reset?'Save and sign in':'Set password and sign in')+'</button></div>'+
       '</form></div></div></div>';
   }
 
@@ -305,11 +317,14 @@
   }
   function adminSettingsHtml(){
     var c=S.config||CORE.defaultConfig(), list=c.deskCopyEmails||[];
-    var email=S.providers.email?('<span class="pill ok">Email sending automatically'+(S.providers.emailVia==="cloudflare"?" via Cloudflare":"")+'</span>'):'<span class="pill manual">Email by hand from the Outbox</span>';
-    var sms=S.providers.sms?'<span class="pill ok">Texts sending automatically</span>':'<span class="pill manual">Texts by hand (carrier registration pending)</span>';
-    return brandSettingsHtml()+'<div class="panel"><div class="ph"><div><h2>Notifications</h2><p class="note">Who is copied on desk notices, and how messages leave the portal.</p></div>'+
+    var via={cloudflare:"Cloudflare Email Service",resend:"Resend",hook:"the lender's mail relay"};
+    var email=S.providers.email?('<span class="pill ok">Email sends automatically via '+esc(via[S.providers.emailVia]||S.providers.emailVia)+'</span>'):'<span class="pill manual">Email by hand from the Outbox (no provider configured)</span>';
+    var sms=S.providers.sms?'<span class="pill ok">Texts send automatically via Twilio</span>':'<span class="pill manual">Texts by hand from the Outbox (no provider configured)</span>';
+    var inbound=S.providers.inboundEmail?'<span class="pill ok">Email replies come back to the order</span>':'<span class="pill info">Email replies go to the reply-to address</span>';
+    var tests=S.demo?'':'<div class="row"><button class="btn btn-s" data-a="testmail"'+(S.providers.email?'':' disabled')+'>Send me a test email</button><button class="btn btn-s" data-a="testsms"'+(S.providers.sms?'':' disabled')+'>Send me a test text</button><span class="sm muted">Goes to your own address or mobile on file, so you can see exactly what borrowers receive.</span></div>';
+    return brandSettingsHtml()+'<div class="panel"><div class="ph"><div><h2>Delivery and notifications</h2><p class="note">How messages leave the portal, and who is copied on desk notices.</p></div>'+
       '<button class="btn btn-p btn-s" data-a="savebank">Save</button></div><div class="pb"><div class="stack">'+
-      '<div class="row">'+email+sms+'</div>'+
+      '<div class="row">'+email+sms+inbound+'</div>'+tests+
       '<div><p class="lbl" style="margin-bottom:7px">Copy these addresses on every desk notice</p>'+
       '<p class="sm muted" style="margin-bottom:6px">Desk notices (accepted, scheduled, inspected, delivered, invoiced, holds, declines) always go to the person who placed the order. Add shared or manager addresses here to copy them too.</p>'+
       '<div>'+list.map(function(e){ return '<span class="dayoff">'+esc(e)+' <button type="button" data-copyoff="'+esc(e)+'" aria-label="Remove">&times;</button></span>'; }).join("")+'</div>'+
@@ -318,7 +333,7 @@
   }
   function personSheet(){
     return sheet("Add someone",
-      '<p class="sm muted">They get a one-time link to choose a password. Their role decides which screens they see.</p>'+
+      '<p class="sm muted">They get a one-time link to choose a password'+(S.providers.email?', emailed to them the moment you save':'')+'. Their role decides which screens they see.</p>'+
       '<label class="f">Name<input id="p_name" autocomplete="off"></label>'+
       '<label class="f">Work email<input id="p_email" type="email" autocomplete="off"></label>'+
       '<label class="f">Mobile, optional<input id="p_phone" autocomplete="off"></label>'+
@@ -326,10 +341,10 @@
       '<ul class="rolehints">'+Object.keys(ROLES).map(function(k){ return '<li><b>'+esc(ROLES[k].name)+'</b> '+esc(ROLES[k].hint)+'</li>'; }).join("")+'</ul>',
       "Add and create link","saveperson");
   }
-  function inviteLinkSheet(name,email,link,days){
+  function inviteLinkSheet(name,email,link,days,emailed){
     var body="Hello "+name+",\n\nYou have been given access to the "+lender()+" Appraisal Desk. Open this link to choose your password (it works once and expires in "+days+" days):\n\n"+link+"\n\nAfter that, sign in at "+location.origin+location.pathname+" with your work email.";
     return '<div class="sheet" data-a="closesheet"><div class="sheetc" data-stop="1"><div class="stack">'+
-      '<div><h2 style="font-size:17px">Sign-in link for '+esc(name)+'</h2><p class="sm muted" style="margin-top:3px">Send this to '+esc(email)+'. It works once and expires in '+days+' days. It is not shown again, but you can issue a new one at any time.</p></div>'+
+      '<div><h2 style="font-size:17px">Sign-in link for '+esc(name)+'</h2><p class="sm muted" style="margin-top:3px">'+(emailed?'<b>Emailed to '+esc(email)+'.</b> The same link is here in case they need it another way.':'Send this to '+esc(email)+'.')+' It works once and expires in '+days+' days. It is not shown again, but you can issue a new one at any time.</p></div>'+
       '<div class="invlink">'+esc(link)+'</div>'+
       '<div class="row"><button class="btn btn-p" data-copy="'+esc(link)+'" data-what="Link">Copy link</button>'+
       '<a class="btn" href="mailto:'+esc(encodeURIComponent(email))+'?subject='+esc(encodeURIComponent("Your "+lender()+" Appraisal Desk sign-in"))+'&body='+esc(encodeURIComponent(body))+'">Send by email</a>'+
@@ -368,7 +383,7 @@
         '<td class="mono sm muted" data-label="Order">'+esc(o.id.slice(0,12))+'</td>'+
         '<td class="sm" data-label="Type">'+esc(o.type)+(S.appraisers.length>1?'<br><span class="muted">'+esc(o.assignedName||"Unassigned")+'</span>':'')+'</td>'+
         '<td class="sm" data-label="Borrower">'+esc(o.borrowerName||"")+'</td>'+
-        '<td data-label="Status">'+rail(o)+pill(o)+(o.unsent?'<span class="pill manual" title="Messages waiting to be sent by hand">'+o.unsent+' to send</span>':'')+'</td>'+
+        '<td data-label="Status">'+rail(o)+pill(o)+(o.unsent?'<span class="pill manual" title="Messages waiting to be sent by hand">'+o.unsent+' to send</span>':'')+(unreadCount(o)?'<span class="pill crit" title="New messages on the conversation">'+unreadCount(o)+' new</span>':'')+'</td>'+
         '<td class="mono sm'+(late?'" style="color:var(--red);font-weight:700':'')+'" data-label="Due">'+esc(fmtDate(o.due))+(late?" late":"")+(o.etaDate&&CORE.isOpen(o)&&o.step<6?'<br><span class="muted">ETA '+esc(fmtDate(o.etaDate))+'</span>':'')+'</td></tr>';
     }).join("");
     return head+'<div class="tablewrap"><table><thead><tr><th>Property</th><th>Order</th><th>Type</th><th>Borrower</th><th>Status</th><th>Due</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
@@ -416,13 +431,41 @@
     if(!b.length) return "";
     return '<div><p class="lbl" style="margin-bottom:7px">'+(role==="appraiser"?"Advance this file":"Actions")+'</p><div class="row">'+b.join("")+'</div></div>';
   }
+  /* one conversation per order: staff to staff, staff to the client, the client back; every entry is on the record */
+  function seenKey(o){ return "thread:"+o.id; }
+  function unreadCount(o){
+    var t=o.thread||[]; if(!t.length||!S.me) return 0;
+    var seen=Number(lsGet(seenKey(o))||0), n=0;
+    for(var i=seen;i<t.length;i++){ if(t[i].role!==S.me.role) n++; }
+    return n;
+  }
+  function markSeen(o){ if(o&&o.thread) lsSet(seenKey(o),String(o.thread.length)); }
+  function threadHtml(o){
+    var role=S.me.role, t=o.thread||[], open=CORE.isOpen(o);
+    var items=t.length?t.map(function(e){
+      var mine=e.role===role, client=e.role==="client", toClient=e.to==="client";
+      var who=client?esc(e.who)+' <span class="muted">(client'+(e.via&&e.via!=="portal"?", by "+esc(e.via):"")+')</span>':esc(e.who)+' <span class="muted">('+esc((ROLES[e.role]||{}).name||e.role)+(toClient?', to the client':'')+')</span>';
+      return '<div class="msg '+(mine?"own":(client||toClient?"sms":""))+'"><div class="meta"><b>'+who+'</b><span class="sm muted">'+esc(fmtTime(e.at))+'</span></div><div style="white-space:pre-wrap">'+esc(e.text)+'</div></div>';
+    }).join(""):'<p class="sm muted">Nothing has been said on this file yet.</p>';
+    var compose="";
+    if(open&&can("post")){
+      var opts='<option value="staff">'+(role==="appraiser"?"the desk":"the appraiser")+'</option>'+(can("postclient")&&o.clientContacted?'<option value="client">'+esc(CORE.contactName(o))+' (text and email)</option>':'');
+      compose='<div class="stack-s" style="margin-top:10px"><label class="f">Message<textarea id="tbox" placeholder="'+(role==="appraiser"?"Answer a question, flag an access problem, or tell the desk what you need.":"Additional property information, a factual correction, or a timing question.")+'"></textarea></label>'+
+        '<div class="row"><label class="f" style="margin:0"><span class="sm muted">Send to</span><select id="tto">'+opts+'</select></label><button class="btn btn-p btn-s" data-a="post">Send</button></div>'+
+        (role!=="appraiser"?'<div class="callout"><b>Value cannot be discussed.</b> Messages are limited to factual corrections, additional property information and timing. Everything here is logged on the Record tab.</div>':'')+'</div>';
+    } else if(open&&role==="officer") compose='<p class="sm muted" style="margin-top:8px">Loan officers read the conversation but do not take part, which keeps the independence record clean. Route anything through the appraisal desk.</p>';
+    return '<div class="stack-s thread">'+items+compose+'</div>';
+  }
   function detailHtml(o){
     var full=!!o.events, role=S.me.role;
-    var tabs=[["status","Status"],["docs","Documents"+(full?" ("+(o.docs||[]).length+")":"")],["msgs","Messages"+(full?" ("+(o.messages||[]).length+")":"")],["log","Record"]];
+    var unread=unreadCount(o);
+    var tabs=[["status","Status"],["docs","Documents"+(full?" ("+(o.docs||[]).length+")":"")],["thread","Conversation"+((o.thread||[]).length?" ("+(o.thread||[]).length+")":"")+(unread&&S.tab!=="thread"?' <span class="pill crit">'+unread+' new</span>':'')],["msgs","Notices"+(full?" ("+(o.messages||[]).length+")":"")],["log","Record"]];
     var body;
+    if(S.tab==="thread") markSeen(o);
     if(!full) body='<div class="empty"><b>Loading</b></div>';
     else if(S.tab==="docs") body=docsHtml(o);
-    else if(S.tab==="msgs") body='<div class="stack-s">'+((o.messages||[]).length?(o.messages||[]).slice().reverse().map(function(m){ return msgHtml(m,false); }).join(""):'<p class="sm muted">No messages yet.</p>')+'</div>';
+    else if(S.tab==="thread") body=threadHtml(o);
+    else if(S.tab==="msgs") body='<div class="stack-s"><p class="sm muted">Automatic notices sent by the portal as the file moved. Replies from the borrower or agent land on the Conversation tab.</p>'+((o.messages||[]).length?(o.messages||[]).slice().reverse().map(function(m){ return msgHtml(m,false); }).join(""):'<p class="sm muted">No notices yet.</p>')+'</div>';
     else if(S.tab==="log") body='<div class="stack">'+
       '<div class="callout"><b>Independence record.</b> Who ordered the file and under what role, the recusal attestation, every status change, message, document and client download, written by the server and never editable from this screen. Export it for an examiner or a reviewer.</div>'+
       logHtml(o)+'<div><a class="btn btn-s" href="/api/orders/'+esc(o.id)+'/log.txt" download>Export independence record</a></div></div>';
@@ -440,17 +483,17 @@
       else if(o.step===6) nextc='<div class="callout"><b>Report delivered.</b> The borrower copy '+((o.consent&&o.consent.borrower)?'was opened electronically on '+esc(fmtTime(o.consent.borrower.at))+'.':'has not been opened yet; if they do not, provide a paper copy.')+'</div>';
       else if(o.step===7&&o.paid) nextc='<div class="callout"><b>Paid.</b> '+esc(money(o.paid.amount))+' by '+esc(o.paid.method)+(o.paid.ref?', reference '+esc(o.paid.ref):'')+', recorded '+esc(fmtTime(o.paid.at))+' by '+esc(o.paid.by)+'.</div>';
       else if(o.step===7) nextc='<div class="callout"><b>Invoiced.</b> Record the payment here when it goes out so the appraiser stops asking.</div>';
-      body='<div class="stack">'+nextc+timelineHtml(o)+actionsHtml(o)+
-        (can("ask")&&CORE.isOpen(o)?'<div class="stack-s"><p class="lbl">Ask the appraiser</p><label class="f"><textarea id="qbox" placeholder="Additional property information, a factual correction, or a timing question."></textarea></label><div><button class="btn btn-s" data-a="ask">Send to appraiser</button></div><div class="callout"><b>Value cannot be discussed.</b> Questions are limited to factual corrections and additional property information. Every message is logged on the Record tab.</div></div>':'')+
-        (role==="appraiser"&&CORE.isOpen(o)?'<div class="stack-s"><p class="lbl">Reply to the desk</p><label class="f"><textarea id="rbox" placeholder="Answer a question or flag something the desk needs to know."></textarea></label><div><button class="btn btn-s" data-a="reply">Send to desk</button></div></div>':'')+
-        '</div>';
+      var last=(o.thread||[]).length?o.thread[o.thread.length-1]:null;
+      var conv=last?'<div class="msg '+(last.role==="client"||last.to==="client"?"sms":"")+'"><div class="meta"><b>Latest on the conversation</b><span class="sm muted">'+esc(last.who)+' &middot; '+esc(fmtTime(last.at))+'</span></div><div>'+esc(last.text.length>220?last.text.slice(0,220)+"...":last.text)+'</div><div class="acts"><button class="btn btn-s" data-tab="thread">Open the conversation'+(unread?' ('+unread+' new)':'')+'</button></div></div>'
+        :(CORE.isOpen(o)&&(can("post")||role==="officer")?'<p class="sm muted">Questions for '+(role==="appraiser"?"the desk":"the appraiser")+(can("postclient")&&o.clientContacted?" or a note to "+esc(CORE.contactName(o)):"")+' go on the <button type="button" class="linkbtn" data-tab="thread">Conversation</button> tab. Every message is logged on the record.</p>':'');
+      body='<div class="stack">'+nextc+timelineHtml(o)+actionsHtml(o)+conv+'</div>';
     }
     var appt=o.apptStart?'<dt>Inspection</dt><dd>'+esc(fmtDay(o.apptStart))+'<br><span class="mono sm">'+esc(fmtHr(o.apptStart))+'</span></dd>':"";
     var links=(role==="desk"||role==="admin")&&o.tokB?'<div class="stack-s"><p class="lbl">Secure client links</p><p class="sm muted">One page each: status and inspection booking. No sign-in, and neither link reaches any other file. They are already inside every message to the client.</p>'+
       '<div class="row"><button class="btn btn-s" data-copy="'+esc(clientLink(o.tokB))+'" data-what="Borrower link">Copy borrower link</button>'+(o.agentName?'<button class="btn btn-s" data-copy="'+esc(clientLink(o.tokA))+'" data-what="Agent link">Copy agent link</button>':'')+'</div></div>':"";
     return '<div class="panel"><div class="ph"><div><h2>'+esc(o.addr)+'</h2>'+
       '<p class="note mono sm">'+esc(o.id.slice(0,12))+'  &middot;  Loan '+esc(o.loan||"n/a")+'  &middot;  '+esc(o.type)+'  &middot;  '+esc(o.purpose||"")+'</p></div>'+pill(o)+'</div>'+
-      '<div class="detail"><div class="dm"><div class="tabs">'+tabs.map(function(t){ return '<button data-tab="'+t[0]+'" aria-selected="'+(S.tab===t[0])+'">'+esc(t[1])+'</button>'; }).join("")+'</div>'+body+'</div>'+
+      '<div class="detail"><div class="dm"><div class="tabs">'+tabs.map(function(t){ return '<button data-tab="'+t[0]+'" aria-selected="'+(S.tab===t[0])+'">'+t[1]+'</button>'; }).join("")+'</div>'+body+'</div>'+
       '<div class="ds"><div class="stack"><dl class="kv">'+
         '<dt>Borrower</dt><dd>'+esc(o.borrowerName||"not set")+(o.borrowerPhone?'<span class="tiny mono">'+esc(o.borrowerPhone)+'</span>':"")+(o.borrowerEmail?'<span class="tiny">'+esc(o.borrowerEmail)+'</span>':"")+'</dd>'+
         '<dt>Agent</dt><dd>'+esc(o.agentName||"None")+(o.agentPhone?'<span class="tiny mono">'+esc(o.agentPhone)+'</span>':"")+(o.agentEmail?'<span class="tiny">'+esc(o.agentEmail)+'</span>':"")+'</dd>'+
@@ -584,13 +627,16 @@
   /* ---------- outbox ---------- */
   function outboxHtml(){
     var fs=[["manual","Needs sending"],["queued","Sending"],["sent","Sent"],["failed","Failed"],["portal","Staff notices"],["all","All"]];
-    var prov=S.demo?'<div class="callout"><b>Demonstration.</b> These are the real texts and emails the portal composes at each step, addressed to the sample people. In this copy nothing is delivered; in service they send automatically, and the appraiser and the desk are copied on the notices meant for them.</div>':'<div class="callout'+(S.providers.email?"":" warn")+'"><b>Email: '+(S.providers.email?("sending automatically"+(S.providers.emailVia==="cloudflare"?" through Cloudflare Email Service.":".")):"not connected yet.")+'</b> '+(S.providers.email?"Queued messages go out within a few seconds and retry for up to half an hour if the mail service is down.":"Until the mail service key is added, every email below has an \"Open in email app\" button that drafts it in Outlook or Gmail for you; press send there, then mark it sent here.")+
-      ' <b>Texts: '+(S.providers.sms?"sending automatically.":"by hand.")+'</b> '+(S.providers.sms?"":"US carriers require A2P 10DLC registration before software can text; until that clears, \"Open in Messages\" drafts the text on a phone.")+
+    var prov=S.demo?'<div class="callout"><b>Demonstration.</b> These are the real texts and emails the portal composes at each step, addressed to the sample people. In this copy nothing is delivered; in service they send automatically, and the appraiser and the desk are copied on the notices meant for them.</div>':'<div class="callout'+(S.providers.email?"":" warn")+'"><b>Email: '+(S.providers.email?("sending automatically"+(S.providers.emailVia==="cloudflare"?" through Cloudflare Email Service.":(S.providers.emailVia==="resend"?" through Resend.":"."))):"not connected yet.")+'</b> '+(S.providers.email?"Queued messages go out within a few seconds and retry for up to half an hour if the mail service is down.":"Until the mail service key is added, every email below has an \"Open in email app\" button that drafts it in Outlook or Gmail for you; press send there, then mark it sent here.")+
+      ' <b>Texts: '+(S.providers.sms?"sending automatically.":"by hand.")+'</b> '+(S.providers.sms?"Delivery reports from the carrier show on each text; a reply of STOP opts that number out automatically.":"US carriers require A2P 10DLC registration before software can text; until that clears, \"Open in Messages\" drafts the text on a phone.")+
       (S.providers.email?"":" Notices to lender staff and the appraiser are not queued while email is off, because everyone sees the same live board; they sit under Staff notices for the record.")+'</div>';
+    var inb=(S.inbound||[]).filter(function(i){ return i.handled!=="posted"; });
+    var inbound=inb.length?'<div class="panel"><div class="ph"><div><h2>Replies that did not land on an order</h2><p class="note">Texts and emails that came back to the portal from a number or address that matches no open order, plus opt-outs. Call or forward by hand.</p></div></div><div class="pb"><div class="stack-s">'+
+      inb.map(function(i){ return '<div class="msg sms"><div class="meta"><b>'+esc(i.channel==="sms"?"Text":"Email")+' from '+esc(i.from_name||i.from_addr)+(i.from_name?' <span class="muted">'+esc(i.from_addr)+'</span>':'')+'</b><span class="pill '+(i.handled==="optout"?"crit":"wait")+'">'+esc(i.handled==="optout"?"Opted out":(i.handled==="optin"?"Opted back in":"Unmatched"))+'</span><span class="sm muted">'+esc(fmtTime(i.at))+'</span></div>'+(i.subject?'<div style="font-weight:600;color:var(--ink);margin-bottom:3px">'+esc(i.subject)+'</div>':'')+'<div style="white-space:pre-wrap">'+esc(i.body)+'</div></div>'; }).join("")+'</div></div></div>':'';
     return '<div class="panel"><div class="ph"><div><h2>Outbox</h2><p class="note">Every email and text the system composes, with its real wording and where it stands. Nothing here is hidden from you.</p></div></div>'+
       '<div class="pb">'+prov+'<div class="filters">'+fs.map(function(f){ return '<button data-mfilter="'+f[0]+'" aria-pressed="'+(S.mfilter===f[0])+'">'+f[1]+'</button>'; }).join("")+'</div>'+
       (S.messages.length?'<div class="stack-s">'+S.messages.map(function(m){ return msgHtml(m,true); }).join("")+'</div>':'<div class="empty"><b>Nothing here</b>'+(S.mfilter==="manual"?"Every message has been sent.":"")+'</div>')+
-      '</div></div>';
+      '</div></div>'+inbound;
   }
 
   /* ---------- feedback ---------- */
@@ -647,9 +693,13 @@
         ((c.uploaded||[]).length?'<p class="sm muted">Received: '+c.uploaded.map(function(u){ return esc(u.name); }).join(", ")+'</p>':'')+
         (!c.cancelled&&c.step<6?'<button type="button" class="drop"><b>Tap to choose files</b><span>PDF, photos, Word or Excel. 20 MB each.</span><input type="file" class="vh" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.docx,.xlsx,.csv,.txt"></button>':'')+'</div>';
     }
+    var thread=(c.thread||[]);
+    var msgs='<div class="stack-s" style="margin-top:14px"><h4 class="calhead">Messages</h4>'+
+      (thread.length?thread.map(function(e){ return '<div class="msg '+(e.mine?"own":"")+'"><div class="meta"><b>'+esc(e.mine?"You":e.who)+'</b><span class="sm muted">'+esc(fmtTime(e.at))+(e.via&&e.via!=="portal"?' &middot; by '+esc(e.via):'')+'</span></div><div style="white-space:pre-wrap">'+esc(e.text)+'</div></div>'; }).join(""):'')+
+      (c.open?'<label class="f"><textarea id="cmsg" placeholder="A question about the inspection, access details, or anything '+esc(aprName)+' should know."></textarea></label><div><button class="btn btn-s" data-a="cpost">Send to '+esc(aprName)+'</button></div><p class="sm muted">Your message goes to '+esc(aprName)+' and '+esc(LN)+'. For anything urgent, call.</p>':'')+'</div>';
     return '<div class="clientwrap"><div class="panel"><div class="pb">'+
       '<p class="lbl">Appraisal status'+(isAgent?' &middot; listing agent':'')+'</p><h2 style="font-size:19px;margin-top:3px">'+esc(c.addr)+'</h2><p class="sm muted">'+esc(c.city)+'</p>'+
-      '<ul class="vst" style="margin-top:14px">'+vst+'</ul><div style="margin-top:14px">'+action+'</div>'+uploads+
+      '<ul class="vst" style="margin-top:14px">'+vst+'</ul><div style="margin-top:14px">'+action+'</div>'+uploads+msgs+
       '<p class="sm muted" style="margin-top:16px;line-height:1.5">'+esc(contact)+' This link is personal to '+esc(c.who)+' and stops working when the file closes.</p>'+
       '</div></div><p class="sm muted" style="text-align:center;margin-top:12px">'+esc(LN)+((c.lender&&c.lender.tagline)?' &middot; '+esc(c.lender.tagline):'')+'</p></div>';
   }
@@ -857,7 +907,7 @@
     if(t.dataset.dayoff){ var c2=S.config; c2.daysOff=(c2.daysOff||[]).filter(function(x){ return x!==t.dataset.dayoff; }); render(); return; }
     if(t.dataset.msent){ api("POST","/api/messages/"+encodeURIComponent(t.dataset.msent)+"/mark",{status:"sent"}).then(function(){ toast("Marked as sent."); return o&&S.view!=="outbox"?loadDetail(o.id):loadMessages().then(render); }).then(function(){ if(o) loadDetail(o.id).catch(function(){}); }).catch(fail); return; }
     if(t.dataset.mretry){ api("POST","/api/messages/"+encodeURIComponent(t.dataset.mretry)+"/retry",{}).then(function(){ toast("Retrying."); return loadMessages().then(render); }).catch(fail); return; }
-    if(t.dataset.uinvite){ var u=S.users.filter(function(x){return x.id===t.dataset.uinvite;})[0]; api("POST","/api/users/"+encodeURIComponent(t.dataset.uinvite)+"/invite",{}).then(function(d){ modal(inviteLinkSheet(u.name,u.email,d.inviteLink,d.expiresDays)); return loadUsers(); }).then(render).catch(fail); return; }
+    if(t.dataset.uinvite){ var u=S.users.filter(function(x){return x.id===t.dataset.uinvite;})[0]; api("POST","/api/users/"+encodeURIComponent(t.dataset.uinvite)+"/invite",{}).then(function(d){ modal(inviteLinkSheet(u.name,u.email,d.inviteLink,d.expiresDays,d.emailed)); return loadUsers(); }).then(render).catch(fail); return; }
     if(t.dataset.uactive){ var to=t.dataset.to==="1"; api("PATCH","/api/users/"+encodeURIComponent(t.dataset.uactive),{active:to}).then(function(){ toast(to?"Restored.":"Suspended. Their sessions were ended."); return loadUsers(); }).then(render).catch(fail); return; }
     if(t.dataset.dvis){ api("PATCH","/api/orders/"+encodeURIComponent(o.id)+"/docs/"+encodeURIComponent(t.dataset.dvis),{clientVisible:t.dataset.to==="1",kind:t.dataset.kind}).then(function(){ return loadDetail(o.id); }).catch(fail); return; }
     if(t.dataset.ddel){ if(!confirm("Remove "+t.dataset.name+" from this order? It stays in storage for the record.")) return; api("DELETE","/api/orders/"+encodeURIComponent(o.id)+"/docs/"+encodeURIComponent(t.dataset.ddel)).then(function(){ toast("Removed."); return loadDetail(o.id); }).catch(fail); return; }
@@ -883,7 +933,7 @@
       pr.then(function(d){ applyBrand(d.brand); render(); toast("Branding saved."); }).catch(fail); return; }
     if(a==="savebank"){ var cc=S.config||CORE.defaultConfig(); api("PUT","/api/config",cc).then(function(d){ S.config=d.config; render(); toast("Bank settings saved."); }).catch(fail); return; }
     if(a==="saveperson"){ var pn=val("p_name"), pe=val("p_email"), pr=val("p_role"), pp=val("p_phone"); if(!pn||!pe){ toast("Name and email are required."); return; }
-      api("POST","/api/users",{name:pn,email:pe,role:pr,phone:pp}).then(function(d){ modal(inviteLinkSheet(pn,pe,d.inviteLink,d.expiresDays)); return loadUsers(); }).then(render).catch(fail); return; }
+      api("POST","/api/users",{name:pn,email:pe,role:pr,phone:pp}).then(function(d){ modal(inviteLinkSheet(pn,pe,d.inviteLink,d.expiresDays,d.emailed)); return loadUsers(); }).then(render).catch(fail); return; }
     if(a==="gonew"){ S.view="new"; renderVT(); return; }
     if(a==="goboard"){ S.view="board"; renderVT(); return; }
     if(a==="createorder"){ createOrder(); return; }
@@ -891,8 +941,10 @@
     if(a==="adddayoff"){ var dv=val("c_off"); if(!/^\d{4}-\d{2}-\d{2}$/.test(dv)){ toast("Pick a date first."); return; } S.config.daysOff=S.config.daysOff||[]; if(S.config.daysOff.indexOf(dv)===-1) S.config.daysOff.push(dv); S.config.daysOff.sort(); render(); return; }
     if(a==="openfb"){ modal(feedbackSheet()); return; }
     if(a==="sendfb"){ var txt=val("fb_text"); if(!txt){ toast("Write a note first."); return; } api("POST","/api/feedback",{kind:val("fb_kind"),text:txt,screen:S.view,order:o?o.addr:""}).then(function(){ modal(""); toast("Thank you. <b>It is on the Feedback tab.</b>"); if(S.view==="feedback") return loadFeedback().then(render); }).catch(fail); return; }
-    if(a==="ask"){ if(!o) return; var q=val("qbox"); if(!q){ toast("Write a question first."); return; } act(o,"ask",{text:q}).then(function(){ var b=$("qbox"); if(b) b.value=""; }); return; }
-    if(a==="reply"){ if(!o) return; var rq=val("rbox"); if(!rq){ toast("Write a reply first."); return; } act(o,"reply",{text:rq}); return; }
+    if(a==="post"){ if(!o) return; var tx=val("tbox"); if(!tx){ toast("Write a message first."); return; } act(o,"post",{text:tx,to:val("tto")||"staff"}).then(function(){ var b=$("tbox"); if(b) b.value=""; markSeen(current()); }); return; }
+    if(a==="forgot"){ modal(forgotSheet()); return; }
+    if(a==="doforgot"){ var fe=val("fg_email"); if(!fe){ toast("Enter your work email."); return; } api("POST","/api/reset",{email:fe}).then(function(d){ modal(""); toast("<b>"+esc(d.message||"Check your email.")+"</b>"); }).catch(fail); return; }
+    if(a==="testmail"||a==="testsms"){ var ch=a==="testmail"?"email":"sms"; toast("Sending a test "+(ch==="sms"?"text":"email")+"..."); api("POST","/api/test-send",{channel:ch}).then(function(d){ toast("<b>Sent to "+esc(d.to)+"</b> via "+esc(d.via)+". Check your "+(ch==="sms"?"phone":"inbox")+"."); }).catch(fail); return; }
     if(a==="addnote"){ modal(sheet("Internal note",'<p class="sm muted">Goes on the record, not to the borrower.</p><label class="f">Note<textarea id="nt_text"></textarea></label>',"Add note","donote")); return; }
     if(a==="donote"){ if(!o) return; var nt=val("nt_text"); if(!nt){ toast("Write a note first."); return; } act(o,"note",{text:nt}); return; }
     if(a==="setfee"){ modal(sheet("Set the fee",'<label class="f">Fee<input id="f_fee" type="number" inputmode="decimal" value="'+(o&&o.fee||"")+'"></label>',"Save","dofee")); return; }
@@ -916,6 +968,7 @@
     if(a==="doaccept"){ if(!o) return; act(o,"accept",{fee:val("a_fee"),etaDate:val("a_eta"),note:val("a_note")},Number(t.dataset.from)); return; }
     if(a==="doinvoice"){ if(!o) return; act(o,"invoice",{fee:val("i_fee")},Number(t.dataset.from)); return; }
     if(a==="dobook"){ if(!o) return; var w=val("b_when"); var wm=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(w); if(!wm){ toast("Pick a date and time."); return; } var ms=CORE.zonedToUtc(+wm[1],+wm[2],+wm[3],+wm[4],+wm[5],tz()); if(!isFinite(ms)){ toast("That date is not valid."); return; } act(o,"book",{slot:new Date(ms).toISOString()},Number(t.dataset.from)); return; }
+    if(a==="cpost"){ if(!S.token) return; var cm=val("cmsg"); if(!cm){ toast("Write a message first."); return; } api("POST","/api/client/"+encodeURIComponent(S.token)+"/message",{text:cm}).then(function(d){ toast("<b>"+esc(d.reply)+"</b>"); return loadClient(); }).catch(fail); return; }
     if(a==="reschedule"){ if(!S.token) return; if(!confirm("Cancel this time and pick a new one?")) return; api("POST","/api/client/"+encodeURIComponent(S.token)+"/reschedule",{}).then(function(d){ toast("<b>"+esc(d.reply)+"</b>"); return loadClient(); }).catch(function(e){ fail(e); loadClient(); }); return; }
     if(a==="noslot"){ if(!S.token) return; var note=prompt("What days and times would work for you?"); if(note===null) return; api("POST","/api/client/"+encodeURIComponent(S.token)+"/noslot",{note:note}).then(function(d){ toast("<b>"+esc(d.reply)+"</b>"); return loadClient(); }).catch(fail); return; }
     if(a==="consent"){ if(!S.token) return; if(!($("consent")&&$("consent").checked)){ toast("Tick the box to continue."); return; } api("POST","/api/client/"+encodeURIComponent(S.token)+"/consent",{}).then(function(){ return loadClient(); }).catch(fail); return; }

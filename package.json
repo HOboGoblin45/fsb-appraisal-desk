@@ -1,6 +1,6 @@
 {
   "name": "fsb-appraisal-desk",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "description": "First Security Bank appraisal order, status, scheduling and delivery portal",
@@ -9,7 +9,11 @@
     "dev": "node build.js && wrangler dev",
     "deploy": "node build.js && wrangler deploy",
     "migrate": "wrangler d1 migrations apply fsb-portal --remote",
-    "test": "node test/run.js"
+    "test": "node test/api.js && node test/v2.js",
+    "test:delivery": "node test/backend.js"
+  },
+  "dependencies": {
+    "postal-mime": "^3.0.0"
   },
   "devDependencies": {
     "wrangler": "^4.132.0"

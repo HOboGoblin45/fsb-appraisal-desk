@@ -284,6 +284,10 @@
   .pill.sent{background:#e8f4ea;color:#1d5f2b;border-color:#bcd9c2}
   .pill.queued{background:#e9eef7;color:var(--navy);border-color:#c5d0e6}
   .pill.manual{background:#fff4e0;color:#8a5a00;border-color:#f0d9a6}
+  .pill.optout{background:#f3e8e8;color:#7a1f1f;border-color:#e2c4c4}
+  .linkbtn{background:none;border:0;padding:0;color:var(--navy);text-decoration:underline;cursor:pointer;font:inherit}
+  .thread .msg.own{margin-left:8%}
+  .thread .msg.sms{margin-right:8%}
   .pill.portal{background:#f1f3f6;color:var(--ink-2);border-color:var(--line)}
   .pill.failed{background:#fbe4e4;color:var(--red);border-color:#efbcbc}
   .msg .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}

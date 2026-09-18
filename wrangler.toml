@@ -23,8 +23,10 @@ LENDER_SHORT = "FSB"
 LENDER_TAGLINE = "Mackinaw, Heritage Lake, Deer Creek, Danvers"
 LENDER_LOGO = "fsb-logo.png"
 TIMEZONE = "America/Chicago"
+VENDOR_EMAIL = "crescicharles@gmail.com"
 # MAIL_FROM = "First Security Bank Appraisal Desk <appraisals@fsb.apprifi.com>"
 # MAIL_REPLY_TO = "someone@fsb1.com"
+# MAIL_INBOUND = "desk@fsb.apprifi.com"   # set once Email Routing sends desk@ (or a catch-all) to this Worker
 
 # Orders, people, audit log, message queue. Create with: npx wrangler d1 create fsb-portal
 [[d1_databases]]
@@ -38,13 +40,15 @@ migrations_dir = "migrations"
 binding = "FILES"
 id = "85874fed1930410eb70ea081b9278011"
 
-# Optional larger document store (needs R2 enabled on the account). Uncomment to switch from KV.
+# Optional larger document store (needs R2 enabled on the account). Uncomment to switch new uploads to R2;
+# earlier files stay readable from KV because each document records where it lives.
 # [[r2_buckets]]
 # binding = "BUCKET"
 # bucket_name = "fsb-portal-docs"
 
-# Automatic email through Cloudflare Email Service (Workers Paid plan). After onboarding the sending
-# domain under Compute > Email Service > Email Sending, uncomment these two lines and redeploy.
+# Automatic email through Cloudflare Email Service (Workers Paid plan). After onboarding apprifi.com under
+# Compute > Email Service > Email Sending, uncomment these two lines and redeploy. Alternative: the
+# RESEND_API_KEY secret. Either way the portal sends branded HTML mail with plain-text fallback.
 # [[send_email]]
 # name = "EMAIL"
 
@@ -53,7 +57,9 @@ id = "85874fed1930410eb70ea081b9278011"
 crons = ["*/5 * * * *"]
 
 # Secrets (never in this file): npx wrangler secret put AUTH_SECRET
-# Optional: RESEND_API_KEY (if not using Cloudflare Email Service), TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM
+# Optional: RESEND_API_KEY (if not using Cloudflare Email Service); TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and
+# either TWILIO_MESSAGING_SERVICE_SID or TWILIO_FROM for texts. Twilio webhooks: /api/hooks/twilio/inbound
+# (incoming messages) and /api/hooks/twilio/status (delivery reports), both signature-checked.
 
 # ---------------------------------------------------------------------------
 # Demonstration copy at https://fsbdemo.apprifi.com: same code, its own database and storage,

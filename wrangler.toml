@@ -14,10 +14,15 @@ routes = [
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/f/*"]
+run_worker_first = ["/api/*", "/f/*", "/brand/*"]
 
 [vars]
 PUBLIC_URL = "https://fsb.apprifi.com"
+LENDER_NAME = "First Security Bank"
+LENDER_SHORT = "FSB"
+LENDER_TAGLINE = "Mackinaw, Heritage Lake, Deer Creek, Danvers"
+LENDER_LOGO = "fsb-logo.png"
+TIMEZONE = "America/Chicago"
 # MAIL_FROM = "First Security Bank Appraisal Desk <appraisals@fsb.apprifi.com>"
 # MAIL_REPLY_TO = "someone@fsb1.com"
 
@@ -64,10 +69,15 @@ routes = [
 directory = "./public"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/f/*"]
+run_worker_first = ["/api/*", "/f/*", "/brand/*"]
 
 [env.demo.vars]
 PUBLIC_URL = "https://fsbdemo.apprifi.com"
+LENDER_NAME = "First Security Bank"
+LENDER_SHORT = "FSB"
+LENDER_TAGLINE = "Mackinaw, Heritage Lake, Deer Creek, Danvers"
+LENDER_LOGO = "fsb-logo.png"
+TIMEZONE = "America/Chicago"
 DEMO = "1"
 PBKDF2_ITER = "1000"
 

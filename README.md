@@ -1,6 +1,14 @@
-# FSB Appraisal Desk
+# Appraisal Desk
 
-The appraisal order, status, scheduling and delivery portal for First Security Bank and its appraiser. One web address, four staff roles, and a personal status page for each borrower and agent. Runs on Cloudflare Workers with a D1 database and KV document storage, at https://fsb.apprifi.com.
+The appraisal order, status, scheduling and delivery portal for a lender and its appraisers. One web address per lender, four staff roles, and a personal status page for each borrower and agent. Runs on Cloudflare Workers with a D1 database and KV document storage. First Security Bank's copy is https://fsb.apprifi.com; the demonstration is https://fsbdemo.apprifi.com.
+
+## Version 2: any lender
+
+Every lender gets an isolated deployment (its own Worker, database, document store, hostname and secret) created by one command, and the lender's administrator controls the branding from inside the portal (name, tagline, colors, logo, time zone). Nothing in the code names a lender. What v2 added, each traced to the appraiser's own client correspondence:
+
+Structured intake: product catalogue (URAR, condo, 2-4 unit, exterior-only, final inspection, manufactured, rent schedule, operating income, FHA, USDA-RD, VA, desk review, recertification, commercial narrative, farm and land, evaluation, retrospective, updated appraisal) with a hint of what the appraiser will need; loan type, valuation premise, occupancy, property type and unit count; parcel numbers; the lender's own reference; closing date, needed-by date and earliest inspection date; delivery format (PDF or PDF plus XML); multi-property group reference with a combined-report flag; intended use and lender requirements; access notes. The needed-by date defaults to the closing date on purchases.
+
+Acceptance with a commitment: the appraiser accepts with a fee, an expected delivery date and a note, and the desk's notice carries all three. Multiple appraisers: the desk assigns or reassigns an order; each appraiser keeps a personal availability calendar that the borrower's booking page uses; notices go only to the assigned appraiser; a Mine filter for appraisers. Reviewer sub-state: the appraiser records when a draft goes to a reviewing or supervising appraiser, with the expected return date, comments and sign-off; the lender sees "With reviewer" instead of asking, and delivery is blocked while the reviewer has it. Preliminary figures: fee and an optional preliminary value released to the desk for closing figures, logged as preliminary. Revisions: the desk requests a revision by kind and description; the file returns to In review, the appraiser uploads and delivers the revised report, and the record numbers each revision. Payment: the desk records the check or ACH reference on an invoiced order; the appraiser is told; an Awaiting payment filter shows what is outstanding. Document requests: the appraiser (or desk) asks the borrower or agent for specific documents by text and email; the borrower uploads them on their status page and they land on the order. Reminders: each morning the portal nudges the appraiser about orders not accepted in a day, not scheduled in two, inspected but not logged, past the committed date, or idle for three days. Credentials: appraisers keep license and E&O numbers and dates on their profile; the administrator sees expiry warnings on the People tab.
 
 ## What it does
 
@@ -40,11 +48,20 @@ Storage is Workers KV (1 GB on the free plan, roughly 100 to 300 appraisal files
 
 ## The demonstration copy
 
-https://fsbdemo.apprifi.com is the same code deployed as a second Worker (--env demo) with its own database and storage. It carries a DEMO flag: a banner, one-click sign-in as any role (password FSBdemo-2026 for every sample account), messages marked composed rather than sent, a "Reset the demonstration" item in the menu, and a cron at 08:00 UTC that reloads the sample data every night. The seed (src/demo.js) replays eight fictional orders through the real order and action code, so every event, message and client link is genuine. Anyone with the link can use it; nothing in it is real and nothing leaves it. Deploy changes to it with npm run build and npx wrangler deploy --env demo; reload its data at any time with a POST to /api/demo/reset while signed in.
+https://fsbdemo.apprifi.com is the same code deployed as a second Worker (`--env demo`) with its own database and storage. It carries a DEMO flag: a banner, one-click sign-in as any role (password FSBdemo-2026 for every sample account), messages marked composed rather than sent, a "Reset the demonstration" item in the menu, and a cron at 08:00 UTC that reloads the sample data every night. The seed (`src/demo.js`) replays eight fictional orders through the real order and action code, so every event, message and client link is genuine. Anyone with the link can use it; nothing in it is real and nothing leaves it. Deploy changes to it with `npm run build && npx wrangler deploy --env demo`; reload its data at any time with a POST to /api/demo/reset while signed in.
 
 ## Limits worth knowing
 
 Cloudflare's free Workers plan allows 100,000 requests a day and 10 milliseconds of CPU per request. Sign-in uses PBKDF2 with 100,000 iterations, which is the most the platform allows; if sign-in ever fails with a CPU limit error, move the account to the Workers Paid plan ($5 a month), which also raises every other limit. D1 holds 5 GB. Sessions last 14 days of inactivity. Invitations last 7 days. Sign-in is rate limited to 10 attempts per email and 30 per address every 15 minutes.
+
+## Adding a lender
+
+From the repository on the deploying PC, after `npx wrangler login`:
+
+    node lender.js new --slug prairie --name "Prairie Community Bank" --domain prairie.apprifi.com --tagline "Pontiac and Fairbury" --tz America/Chicago
+    node provision.js admin --env prairie --name "Full Name" --email person@lender.com
+
+The first command creates the database and document store, appends an `[env.prairie]` block to wrangler.toml, applies the schema, sets a fresh AUTH_SECRET and deploys to the hostname (the hostname must be a name in a zone on the same Cloudflare account). The second issues the lender's administrator invitation. The administrator sets the logo and colors under Lender branding. Later code changes go out with `node lender.js deploy --slug prairie`. Each lender's data never shares a database or store with another lender's.
 
 ## Deploying changes
 

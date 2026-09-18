@@ -6,6 +6,7 @@
    node provision.js admin --name "Ryan Curtis" --email ryan@example.com [--phone "(309) 555-0100"] [--local]
    node provision.js status [--local]
    node provision.js reinvite --email ryan@example.com [--local]
+   Add --env <slug> to act on another lender's deployment (see lender.js).
 */
 import {createHash, randomBytes} from "node:crypto";
 import {readFileSync, writeFileSync, unlinkSync} from "node:fs";
@@ -15,7 +16,14 @@ const args = process.argv.slice(2);
 const cmd = args[0];
 const opt = (k) => { const i = args.indexOf("--" + k); return i > -1 ? args[i + 1] : undefined; };
 const local = args.includes("--local");
-const DB = "fsb-portal";
+const envName = opt("env"); // a lender environment from wrangler.toml, e.g. --env prairie
+function dbName() {
+  const toml = readFileSync("wrangler.toml", "utf8");
+  if (!envName) { const m = /\[\[d1_databases\]\][^\[]*database_name\s*=\s*"([^"]+)"/.exec(toml); return m ? m[1] : "fsb-portal"; }
+  const block = toml.split("[env." + envName + "]")[1]; if (!block) die("No [env." + envName + "] in wrangler.toml");
+  const m = /database_name\s*=\s*"([^"]+)"/.exec(block); return m ? m[1] : die("No database_name under [env." + envName + "]");
+}
+const DB = dbName();
 
 function die(msg) { console.error(msg); process.exit(1); }
 function q(v) { return "'" + String(v).replace(/'/g, "''") + "'"; }
@@ -24,13 +32,15 @@ function sha256(s) { return createHash("sha256").update(s, "utf8").digest("hex")
 function publicUrl() {
   if (opt("url")) return opt("url").replace(/\/$/, "");
   if (local) return "http://127.0.0.1:8787";
-  const m = /PUBLIC_URL\s*=\s*"([^"]+)"/.exec(readFileSync("wrangler.toml", "utf8"));
+  const toml = readFileSync("wrangler.toml", "utf8");
+  const scope = envName ? (toml.split("[env." + envName + "]")[1] || "") : toml.split("[env.")[0];
+  const m = /PUBLIC_URL\s*=\s*"([^"]+)"/.exec(scope);
   return m ? m[1].replace(/\/$/, "") : die("PUBLIC_URL not found in wrangler.toml; pass --url");
 }
 /* Reads go through --command (remote --file returns only an import summary); writes go through --file. */
 function d1(sql, read) {
   const file = ".provision.sql";
-  const args = ["wrangler", "d1", "execute", DB, local ? "--local" : "--remote", "--json"];
+  const args = ["wrangler", "d1", "execute", DB, local ? "--local" : "--remote", "--json"].concat(envName ? ["--env", envName] : []);
   if (read) args.push("--command", '"' + sql.replace(/"/g, "'") + '"'); else { writeFileSync(file, sql); args.push("--file", file); }
   try {
     const r = spawnSync("npx", args, {encoding: "utf8", shell: true});

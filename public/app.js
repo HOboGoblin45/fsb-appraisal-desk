@@ -1,4 +1,4 @@
-/* FSB Appraisal Desk: shared core.
+/* Appraisal Desk: shared core.
    One source of truth for the order state machine, permissions, slot generation and
    message wording. Runs unchanged in the Cloudflare Worker (ES module) and in the
    browser (the build script strips the final export line). No I/O in here. */
@@ -17,9 +17,37 @@ var CORE = (function(){
     officer:{name:"Loan officer",hint:"Read only. Sees status, downloads the finished report. Cannot touch the order, which keeps the independence record clean."},
     appraiser:{name:"Appraiser",hint:"Accepts, schedules, inspects, delivers the report and invoice, sets availability."}
   };
-  var REPORT_TYPES = ["1004 URAR","1073 Condo","1025 Small Residential Income","2055 Exterior","1004C Manufactured","General Purpose","Commercial narrative","Agricultural / farm","Evaluation","Desk review"];
-  var PURPOSES = ["Purchase","Refinance","Construction","Home equity","Estate","Other"];
-  var ACCESS = ["Borrower","Agent","Lockbox, no contact","Owner (not the borrower)"];
+  /* product catalogue: name, whether an XML (MISMO/UAD) file is normally required, and what the appraiser needs before starting */
+  var PRODUCTS = [
+    {name:"1004 URAR",xml:true,needs:"Sales contract for purchases."},
+    {name:"1073 Condo",xml:true,needs:"Sales contract, HOA contact and budget if available."},
+    {name:"1025 Small Residential Income (2-4 units)",xml:true,needs:"Leases, rent roll, sales contract."},
+    {name:"2055 Exterior-only",xml:true,needs:""},
+    {name:"1004D / 442 Final inspection",xml:false,needs:"Original report and the list of work to be completed."},
+    {name:"1004C Manufactured home",xml:true,needs:"HUD tags and title status."},
+    {name:"1007 Rent schedule",xml:false,needs:"Current leases."},
+    {name:"216 Operating income statement",xml:false,needs:"Twelve months of income and expenses."},
+    {name:"FHA 1004",xml:true,needs:"FHA case number; sales contract."},
+    {name:"USDA-RD 1004",xml:true,needs:"Sales contract."},
+    {name:"VA 1004",xml:true,needs:"VA case number; sales contract."},
+    {name:"Desk review",xml:false,needs:"The report under review."},
+    {name:"Recertification of value",xml:false,needs:"Original report."},
+    {name:"Commercial narrative",xml:false,needs:"Leases, rent roll, twelve months of expenses, plans and cost breakdown if construction."},
+    {name:"Agricultural / farm / land",xml:false,needs:"Parcel numbers, acreage, FSA maps or plat, leases."},
+    {name:"Evaluation",xml:false,needs:""},
+    {name:"Date of death / retrospective",xml:false,needs:"Effective date, parcel list, attorney contact."},
+    {name:"Updated appraisal (as is)",xml:false,needs:"Original report."}
+  ];
+  var REPORT_TYPES = PRODUCTS.map(function(p){ return p.name; });
+  var PURPOSES = ["Purchase","Refinance","Construction","Purchase and improvement","Home equity","Additional collateral","Estate","Other"];
+  var LOAN_TYPES = ["Conventional","Portfolio / in-house","FHA","VA","USDA-RD","Construction","Commercial","HELOC","Not a loan"];
+  var PREMISES = ["As is","As completed (subject to plans and specs)","As improved (subject to listed repairs)","Final inspection only","Updated appraisal","Retrospective (date of death)"];
+  var OCCUPANCY = ["Owner occupied","Tenant occupied","Vacant","Seller occupied","Under construction"];
+  var PROPERTY_TYPES = ["Single family","Condominium","2-4 units","Multifamily (5+)","Manufactured home","Commercial","Mixed use","Farm / agricultural","Vacant land","Other"];
+  var DELIVERY_FORMATS = ["PDF","PDF and XML (UAD/MISMO)"];
+  var ACCESS = ["Borrower","Agent","Seller","Property manager","Attorney or executor","Lockbox, no contact","Owner (not the borrower)"];
+  var REVISION_KINDS = ["Correction (names, header, client)","Missing item","Question on comparables or adjustments","Scope change","Reconsideration of value"];
+  var PAY_METHODS = ["Check","ACH / direct deposit","Card","Other"];
   var DOC_KINDS = {
     contract:{name:"Sales contract",who:"desk"},
     engagement:{name:"Engagement letter",who:"desk"},
@@ -37,10 +65,10 @@ var CORE = (function(){
 
   /* what each role may do; the server enforces this, the browser only hides buttons */
   var PERM = {
-    admin:    {view:true, people:true, config:true, cancel:true, note:true, docs:true, outbox:true},
-    desk:     {view:true, place:true, edit:true, cancel:true, ask:true, note:true, docs:true, outbox:true, hold:true, renotify:true, reissue:true, book:true},
+    admin:    {view:true, people:true, config:true, brand:true, cancel:true, note:true, docs:true, outbox:true, assign:true, paid:true, revise:true},
+    desk:     {view:true, place:true, edit:true, cancel:true, ask:true, note:true, docs:true, outbox:true, hold:true, renotify:true, reissue:true, book:true, assign:true, paid:true, revise:true, docreq:true},
     officer:  {view:true, docs:false, outbox:true},
-    appraiser:{view:true, accept:true, decline:true, schedule:true, renotify:true, book:true, inspect:true, review:true, deliver:true, invoice:true, hold:true, fee:true, config:true, docs:true, note:true, outbox:true}
+    appraiser:{view:true, accept:true, decline:true, schedule:true, renotify:true, book:true, inspect:true, review:true, deliver:true, invoice:true, hold:true, fee:true, config:true, docs:true, note:true, outbox:true, prelim:true, reviewer:true, docreq:true}
   };
   function can(role,what){ return !!(PERM[role]&&PERM[role][what]); }
 
@@ -48,8 +76,12 @@ var CORE = (function(){
     if(o.cancelled) return "Cancelled";
     if(o.declined) return "Declined";
     if(o.hold) return "On hold";
+    if(o.step===5&&o.revision&&!o.revision.resolvedAt) return "Revision requested";
+    if(o.step===5&&o.review&&(o.review.status==="sent"||o.review.status==="returned")) return "With reviewer";
+    if(o.step===7&&o.paid) return "Paid";
     return STEPS[o.step]||"Received";
   }
+  function lenderName(cfg){ return ((cfg&&cfg.lenderName)||"").trim()||"your lender"; }
   function isOpen(o){ return !o.cancelled && !o.declined && o.step<STEPS.length-1; }
 
   /* ---------- time, always in the bank's zone ---------- */
@@ -75,7 +107,7 @@ var CORE = (function(){
 
   function defaultConfig(){
     return {days:[1,2,3,4,5],startHour:8.5,endHour:16,slotMinutes:60,bufferMinutes:45,leadHours:24,daysOff:[],
-            appraiserName:"",appraiserPhone:"",appraiserEmail:"",timeZone:TZ,note:"",deskCopyEmails:[]};
+            appraiserName:"",appraiserPhone:"",appraiserEmail:"",timeZone:TZ,note:"",deskCopyEmails:[],lenderName:""};
   }
   function num(v,dflt){ v=Number(v); return isFinite(v)&&v>=0?v:dflt; }
   /* Open inspection times: honours days worked, hours, days off, lead time, length and travel buffer.
@@ -113,10 +145,10 @@ var CORE = (function(){
   function aprCap(cfg){ return apr(cfg)||"The appraiser"; }
   function aprLower(cfg){ return apr(cfg)||"the appraiser"; }
   function aprSig(cfg){ var n=apr(cfg), p=((cfg&&cfg.appraiserPhone)||"").trim();
-    if(n&&p) return n+", "+p+"."; if(n) return n+"."; if(p) return "Your appraiser, "+p+"."; return "First Security Bank."; }
+    if(n&&p) return n+", "+p+"."; if(n) return n+"."; if(p) return "Your appraiser, "+p+"."; return lenderName(cfg)+"."; }
   function qLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?(" Questions: "+p+"."):""; }
   function assignedLine(cfg){ var n=apr(cfg); return n?(" "+n+" is your appraiser."):""; }
-  function contactLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?("Questions? Call "+aprLower(cfg)+" at "+p+"."):"Questions? Contact your loan officer at First Security Bank."; }
+  function contactLine(cfg){ var p=((cfg&&cfg.appraiserPhone)||"").trim(); return p?("Questions? Call "+aprLower(cfg)+" at "+p+"."):("Questions? Contact your loan officer at "+lenderName(cfg)+"."); }
   function money(n){ n=Number(n)||0; return "$"+n.toLocaleString("en-US"); }
 
   /* who gets what. Each message: {channel:"email"|"sms", party:"borrower"|"agent"|"desk"|"appraiser"|"officer", subject, body}
@@ -127,14 +159,14 @@ var CORE = (function(){
   var T = {
     created:function(o,c){ return [
       {channel:"email",party:"appraiser",subject:"New appraisal order: "+o.addr,
-       body:"First Security Bank has placed an order for "+o.addr+", "+o.city+". Type: "+o.type+". Purpose: "+o.purpose+(o.due?(". Due: "+fmtDate(o.due)):"")+(o.rush?". RUSH.":"")+". Open it in the portal to accept or decline: [portal]"}
+       body:lenderName(c)+" has placed an order for "+o.addr+", "+o.city+". Product: "+o.type+". Purpose: "+o.purpose+(o.loanType?(". Loan: "+o.loanType):"")+(o.premise?(". "+o.premise):"")+(o.closingDate?(". Closing "+fmtDate(o.closingDate)):"")+(o.due?(". Due: "+fmtDate(o.due)):"")+(o.rush?". RUSH.":"")+(o.assignedName?(". Assigned to "+o.assignedName+"."):"")+" Open it in the portal to accept or decline: [portal]"}
     ];},
     accepted:function(o,c){ var m=[
       {channel:"email",party:"desk",subject:"Appraisal accepted: "+o.addr,
-       body:aprCap(c)+" has accepted the appraisal at "+o.addr+(o.fee?(" at "+money(o.fee)):"")+(o.due?(", due "+fmtDate(o.due)):"")+". You will be notified as the file moves. [portal]"},
-      {channel:"sms",party:"borrower",body:"First Security Bank has ordered an appraisal for "+o.addr+"."+assignedLine(c)+" Track it here: [link]. Reply STOP to opt out."},
+       body:aprCap(c)+" has accepted the appraisal at "+o.addr+(o.fee?(" at "+money(o.fee)):"")+(o.etaDate?(", expected delivery "+fmtDate(o.etaDate)):(o.due?(", due "+fmtDate(o.due)):""))+(o.acceptNote?(". "+o.acceptNote):"")+". You will be notified as the file moves. [portal]"},
+      {channel:"sms",party:"borrower",body:lenderName(c)+" has ordered an appraisal for "+o.addr+"."+assignedLine(c)+" Track it here: [link]. Reply STOP to opt out."},
       {channel:"email",party:"borrower",subject:"Your appraisal has been ordered: "+o.addr,
-       body:"First Security Bank has ordered an appraisal for "+o.addr+"."+assignedLine(c)+" You can follow its progress and, when the time comes, choose your inspection time here: [link]. "+contactLine(c)}
+       body:lenderName(c)+" has ordered an appraisal for "+o.addr+"."+assignedLine(c)+" You can follow its progress and, when the time comes, choose your inspection time here: [link]. "+contactLine(c)}
     ]; if(o.officerName) m.push({channel:"email",party:"officer",subject:"Appraisal accepted: "+o.addr,body:aprCap(c)+" has accepted the appraisal at "+o.addr+". Status: [portal]"}); return m; },
     declined:function(o,c){ return [
       {channel:"email",party:"desk",subject:"Appraisal declined: "+o.addr,
@@ -167,7 +199,7 @@ var CORE = (function(){
     delivered:function(o,c){ var m=[
       {channel:"email",party:"desk",subject:"Appraisal delivered: "+o.addr,body:"The appraisal report for "+o.addr+" has been delivered through the portal and is available to download. [portal]"},
       {channel:"email",party:"borrower",subject:"Your appraisal copy: "+o.addr,
-       body:"A copy of the appraisal for "+o.addr+" is available to you at no charge: [link]. You are receiving this electronically because you agreed to electronic delivery. To receive a paper copy instead at no charge, reply to this message or call your loan officer at First Security Bank."}
+       body:"A copy of the appraisal for "+o.addr+" is available to you at no charge: [link]. You are receiving this electronically because you agreed to electronic delivery. To receive a paper copy instead at no charge, reply to this message or call your loan officer at "+lenderName(c)+"."}
     ]; if(o.officerName) m.push({channel:"email",party:"officer",subject:"Appraisal delivered: "+o.addr,body:"The report for "+o.addr+" is in the portal. [portal]"}); return m; },
     invoiced:function(o,c){ return [
       {channel:"email",party:"desk",subject:"Invoice: "+o.addr,body:"The invoice for the appraisal at "+o.addr+(o.fee?(" in the amount of "+money(o.fee)):"")+" is in the portal. "+aprSig(c)+" [portal]"}
@@ -179,14 +211,38 @@ var CORE = (function(){
       {channel:"email",party:"desk",subject:"Appraisal resumed: "+o.addr,body:"The appraisal at "+o.addr+" is off hold and moving again. [portal]"}
     ];},
     cancelled:function(o,c){ var m=[
-      {channel:"email",party:"appraiser",subject:"Order cancelled: "+o.addr,body:"First Security Bank cancelled the appraisal order at "+o.addr+". Reason: "+(o.cancelReason||"not stated")+". Stop work on this file. [portal]"}
-    ]; if(o.clientContacted){ m.push({channel:"sms",party:contactParty(o),body:"The appraisal inspection for "+o.addr+" is no longer needed. Nothing further is required from you. First Security Bank."}); } return m; },
+      {channel:"email",party:"appraiser",subject:"Order cancelled: "+o.addr,body:lenderName(c)+" cancelled the appraisal order at "+o.addr+". Reason: "+(o.cancelReason||"not stated")+". Stop work on this file."+(o.step>=3?" If a trip was made, note the trip fee on the order.":"")+" [portal]"}
+    ]; if(o.clientContacted){ m.push({channel:"sms",party:contactParty(o),body:"The appraisal inspection for "+o.addr+" is no longer needed. Nothing further is required from you. "+lenderName(c)+"."}); } return m; },
     ask:function(o,c,p){ return [
       {channel:"email",party:"appraiser",subject:"Question on "+o.addr,body:(p&&p.text||"")+"\n\nSent by "+(p&&p.by||"the desk")+" through the portal. Logged on the independence record. [portal]"}
     ];},
     reply:function(o,c,p){ return [
       {channel:"email",party:"desk",subject:"Reply on "+o.addr,body:(p&&p.text||"")+"\n\nFrom "+aprLower(c)+" through the portal. [portal]"}
-    ];}
+    ];},
+    assigned:function(o,c){ return [
+      {channel:"email",party:"appraiser",subject:"Assigned to you: "+o.addr,body:"The appraisal at "+o.addr+", "+o.city+" ("+o.type+", "+o.purpose+") has been assigned to "+(o.assignedName||"you")+(o.due?(", due "+fmtDate(o.due)):"")+". Open it in the portal to accept or decline: [portal]"}
+    ];},
+    reviewsent:function(o,c){ return [
+      {channel:"email",party:"desk",subject:"Report in review: "+o.addr,body:"The report for "+o.addr+" is complete and with "+((o.review&&o.review.name)||"the reviewing appraiser")+" for review and signature"+(o.review&&o.review.eta?(", expected back "+fmtDate(o.review.eta)):"")+". You will be notified when it is delivered. [portal]"}
+    ];},
+    prelim:function(o,c,p){ return [
+      {channel:"email",party:"desk",subject:"Preliminary figures: "+o.addr,body:"For closing figures only, ahead of the signed report: "+(o.fee?("appraisal fee "+money(o.fee)):"fee to follow")+(p&&p.value?("; preliminary value "+money(p.value)):"")+". The signed report follows"+(o.etaDate?(" by "+fmtDate(o.etaDate)):"")+" and controls. "+aprSig(c)+" [portal]"}
+    ];},
+    revise:function(o,c,p){ return [
+      {channel:"email",party:"appraiser",subject:"Revision requested: "+o.addr,body:lenderName(c)+" requests a revision to the report for "+o.addr+". "+((p&&p.kind)||"")+": "+((p&&p.text)||"")+" Upload the revised report and deliver it again through the portal. [portal]"}
+    ];},
+    redelivered:function(o,c){ var m=[
+      {channel:"email",party:"desk",subject:"Revised report delivered: "+o.addr,body:"The revised appraisal report for "+o.addr+" (revision "+((o.revision&&o.revision.n)||1)+") has been delivered through the portal. [portal]"}
+    ]; if(o.officerName) m.push({channel:"email",party:"officer",subject:"Revised report delivered: "+o.addr,body:"The revised report for "+o.addr+" is in the portal. [portal]"}); return m; },
+    paid:function(o,c){ return [
+      {channel:"email",party:"appraiser",subject:"Payment recorded: "+o.addr,body:lenderName(c)+" recorded payment for "+o.addr+(o.fee?(" of "+money(o.fee)):"")+(o.paid&&o.paid.method?(" by "+o.paid.method):"")+(o.paid&&o.paid.ref?(", reference "+o.paid.ref):"")+". [portal]"}
+    ];},
+    docreq:function(o,c,p){ return [
+      {channel:"sms",party:contactParty(o),body:aprCap(c)+" needs a few documents for the appraisal at "+o.addr+". Upload them here: [link]."+qLine(c)},
+      {channel:"email",party:contactParty(o),subject:"Documents needed for your appraisal: "+o.addr,body:"To complete the appraisal at "+o.addr+", "+aprLower(c)+" needs the following: "+((p&&p.items)||"")+". Please upload them on your status page: [link]. "+aprSig(c)}
+    ];},
+    nudge:function(o,c,p){ var why={accept:"has not been accepted or declined",schedule:"has no scheduling request yet",inspect:"had its inspection scheduled but nothing has been logged since",deliver:"is past the expected delivery date",stale:"has had no activity for three days"};
+      return [{channel:"email",party:"appraiser",subject:"Reminder: "+o.addr+" "+(why[p&&p.key]||"needs attention"),body:"The order at "+o.addr+" ("+o.type+(o.due?(", due "+fmtDate(o.due)):"")+") "+(why[p&&p.key]||"needs attention")+". The lender sees the same status. Update it here: [portal]"}]; }
   };
 
   /* ---------- transitions (pure). Throws {code,msg}. Returns {events:[],messages:[],msg} ---------- */
@@ -204,8 +260,10 @@ var CORE = (function(){
         if(!can(role,"accept")) fail("forbidden","Only the appraiser can accept.");
         if(o.step!==0) fail("stale","This order already moved to "+statusOf(o)+".");
         if(p.fee!==undefined&&p.fee!==null&&p.fee!=="") o.fee=Number(p.fee)||0;
-        o.step=1; o.acceptedAt=now; o.appraiserName=apr(cfg)||who; o.clientContacted=true;
-        log("Order accepted."+(o.fee?(" Fee "+money(o.fee)+"."):""));
+        if(p.etaDate&&/^\d{4}-\d{2}-\d{2}$/.test(String(p.etaDate))) o.etaDate=String(p.etaDate);
+        o.acceptNote=String(p.note||"").slice(0,300);
+        o.step=1; o.acceptedAt=now; o.appraiserName=o.assignedName||apr(cfg)||who; if(!o.assignedTo&&actor.id){ o.assignedTo=actor.id; o.assignedName=who; } o.clientContacted=true;
+        log("Order accepted."+(o.fee?(" Fee "+money(o.fee)+"."):"")+(o.etaDate?(" Expected delivery "+fmtDate(o.etaDate)+"."):"")+(o.acceptNote?(" "+o.acceptNote):""));
         send("accepted"); reply="Accepted. The desk and the borrower have been notified."; break;
       case "decline":
         if(!can(role,"decline")) fail("forbidden","Only the appraiser can decline.");
@@ -261,8 +319,63 @@ var CORE = (function(){
         if(o.hold) fail("held","Release the hold first.");
         if(o.step!==5) fail("stale","This file is at "+statusOf(o)+".");
         if(!p.hasReport&&!p.force) fail("noreport","No appraisal report is attached. Upload it first, or confirm delivery without one.");
-        o.step=6; o.deliveredAt=now; log("Report delivered through the portal"+(p.hasReport?"":" (no report file attached)")+". Borrower copy issued; electronic delivery counts once the borrower has consented on their page.");
+        if(o.review&&o.review.status==="sent"&&!p.force) fail("review","The report is still with the reviewer. Record their sign-off first.");
+        if(o.revision&&!o.revision.resolvedAt){
+          o.revision.resolvedAt=now; o.step=o.invoicedAt?7:6; o.redeliveredAt=now;
+          log("Revised report delivered (revision "+o.revision.n+")."); send("redelivered"); reply="Revised report delivered."; break;
+        }
+        o.step=6; o.deliveredAt=now; if(o.review) o.review.status="signed"; log("Report delivered through the portal"+(p.hasReport?"":" (no report file attached)")+". Borrower copy issued; electronic delivery counts once the borrower has consented on their page.");
         send("delivered"); reply="Delivered. Borrower copy issued and logged."; break;
+      case "assign": {
+        if(!can(role,"assign")) fail("forbidden","Only the desk or the administrator assigns.");
+        if(o.step>=6) fail("stale","A delivered file cannot be reassigned.");
+        if(!p.userId||!p.name) fail("bad","Pick an appraiser.");
+        var was=o.assignedName; o.assignedTo=String(p.userId).slice(0,60); o.assignedName=String(p.name).slice(0,120); o.appraiserName=o.assignedName;
+        log((was?("Reassigned from "+was+" to "):"Assigned to ")+o.assignedName+"."); send("assigned"); reply="Assigned to "+o.assignedName+"."; break; }
+      case "sendreview":
+        if(!can(role,"reviewer")) fail("forbidden","Appraiser action.");
+        if(o.step!==5) fail("stale","Move the file to in review first.");
+        o.review={status:"sent",name:String(p.name||"").slice(0,120),eta:/^\d{4}-\d{2}-\d{2}$/.test(String(p.eta||""))?String(p.eta):"",sentAt:now,note:String(p.note||"").slice(0,300)};
+        log("Draft sent to "+(o.review.name||"the reviewing appraiser")+" for review and signature"+(o.review.eta?(", expected back "+fmtDate(o.review.eta)):"")+"."); send("reviewsent"); reply="Reviewer noted. The desk can see the file is in review."; break;
+      case "reviewback":
+        if(!can(role,"reviewer")) fail("forbidden","Appraiser action.");
+        if(!o.review||o.review.status!=="sent") fail("stale","Nothing is with the reviewer.");
+        o.review.status="returned"; o.review.returnedAt=now; o.review.comments=String(p.text||"").slice(0,1000);
+        log("Reviewer returned comments"+(o.review.comments?(": "+o.review.comments):".")); reply="Noted."; break;
+      case "reviewsigned":
+        if(!can(role,"reviewer")) fail("forbidden","Appraiser action.");
+        if(!o.review||o.review.status==="signed") fail("stale","No review is open.");
+        o.review.status="signed"; o.review.signedAt=now; log("Reviewer signed off ("+(o.review.name||"reviewer")+")."); reply="Signed off. Deliver when the signed report is uploaded."; break;
+      case "prelim":
+        if(!can(role,"prelim")) fail("forbidden","Appraiser action.");
+        if(o.step<4||o.step>5) fail("stale","Preliminary figures can be released after the inspection and before delivery.");
+        if(p.fee!==undefined&&p.fee!==null&&p.fee!=="") o.fee=Number(p.fee)||0;
+        o.prelim={at:now,value:Number(p.value)||0,by:who};
+        log("Preliminary figures released to the lender for closing purposes"+(o.prelim.value?(": value "+money(o.prelim.value)):"")+(o.fee?(", fee "+money(o.fee)):"")+". The signed report controls."); send("prelim",{value:o.prelim.value}); reply="Released to the desk."; break;
+      case "revise": {
+        if(!can(role,"revise")) fail("forbidden","Only the desk or the administrator requests revisions.");
+        if(o.step<6) fail("stale","The report has not been delivered yet. Send a question instead.");
+        if(!p.text) fail("bad","Describe the revision.");
+        var n=((o.revision&&o.revision.n)||0)+1;
+        o.revision={n:n,kind:String(p.kind||REVISION_KINDS[0]).slice(0,80),text:String(p.text).slice(0,2000),requestedAt:now,by:who,resolvedAt:null};
+        o.step=5; log("Revision "+n+" requested ("+o.revision.kind+"): "+o.revision.text); send("revise",{kind:o.revision.kind,text:o.revision.text}); reply="Revision requested. The appraiser was notified."; break; }
+      case "paid":
+        if(!can(role,"paid")) fail("forbidden","Only the desk or the administrator records payment.");
+        if(o.step!==7) fail("stale","Payment is recorded after the invoice.");
+        o.paid={at:now,by:who,method:String(p.method||"Check").slice(0,40),ref:String(p.ref||"").slice(0,80),amount:Number(p.amount)||o.fee||0};
+        log("Payment recorded: "+money(o.paid.amount)+" by "+o.paid.method+(o.paid.ref?(", reference "+o.paid.ref):"")+"."); send("paid"); reply="Payment recorded."; break;
+      case "docreq":
+        if(!can(role,"docreq")) fail("forbidden","Not allowed for your role.");
+        if(!isOpen(o)) fail("stale","This file is closed.");
+        if(!p.items) fail("bad","List what you need.");
+        o.docRequest={items:String(p.items).slice(0,800),at:now,by:who}; o.clientContacted=true;
+        log("Documents requested from "+contactName(o)+": "+o.docRequest.items); send("docreq",{items:o.docRequest.items}); reply="Request sent with an upload link."; break;
+      case "clientdoc":
+        if(role!=="client") fail("forbidden","Client action.");
+        log(contactName(o)+" uploaded "+String(p.name||"a document").slice(0,200)+"."); reply="Received."; break;
+      case "nudge":
+        if(role!=="system") fail("forbidden","System action.");
+        o.nudged=o.nudged||{}; o.nudged[p.key]=now; send("nudge",{key:p.key}); reply="nudged"; break;
       case "invoice":
         if(!can(role,"invoice")) fail("forbidden","Only the appraiser can invoice.");
         if(o.step!==6) fail("stale","Deliver the report first.");
@@ -301,8 +414,8 @@ var CORE = (function(){
       case "edit": {
         if(!can(role,"edit")) fail("forbidden","Only the desk can edit an order.");
         if(o.step>=4) fail("stale","An inspected file cannot be edited. Add a note or ask the appraiser instead.");
-        var F=["addr","city","loan","type","purpose","due","rush","borrowerName","borrowerPhone","borrowerEmail","agentName","agentPhone","agentEmail","accessVia","notes","officerName","officerEmail","fee"];
-        var ch=[]; F.forEach(function(k){ if(p[k]===undefined) return; var v=p[k]; if(k==="fee") v=Number(v)||0; else if(k==="rush") v=!!v; else v=String(v).slice(0,k==="notes"?2000:200);
+        var F=["addr","city","loan","type","purpose","due","rush","borrowerName","borrowerPhone","borrowerEmail","agentName","agentPhone","agentEmail","accessVia","notes","officerName","officerEmail","fee","loanType","premise","occupancy","propertyType","units","pins","closingDate","earliestInspection","deliveryFormat","refNo","groupRef","combinedReport","intendedUse","accessNotes"];
+        var ch=[]; F.forEach(function(k){ if(p[k]===undefined) return; var v=p[k]; if(k==="fee"||k==="units") v=Number(v)||0; else if(k==="rush"||k==="combinedReport") v=!!v; else v=String(v).slice(0,(k==="notes"||k==="intendedUse")?2000:200);
           if(String(o[k]===undefined?"":o[k])!==String(v)){ ch.push(k); o[k]=v; } });
         if(!ch.length) fail("bad","Nothing changed.");
         log("Order edited: "+ch.join(", ")+"."); reply="Saved."+(o.clientContacted&&(ch.indexOf("borrowerPhone")>-1||ch.indexOf("borrowerEmail")>-1||ch.indexOf("agentPhone")>-1||ch.indexOf("agentEmail")>-1)?" Contact details changed after messages went out; resend the link if needed.":""); break; }
@@ -320,39 +433,65 @@ var CORE = (function(){
     var a=[];
     if(o.cancelled||o.declined) return a;
     if(o.hold){ if(can(role,"hold")) a.push(["release","Release hold",1]); return a; }
+    var inRevision=o.step===5&&o.revision&&!o.revision.resolvedAt;
     if(role==="appraiser"){
       if(o.step===0){ a.push(["accept","Accept order",1]); a.push(["decline","Decline",0]); }
       if(o.step===1) a.push(["schedule","Send scheduling request",1]);
       if(o.step===2){ a.push(["renotify","Resend scheduling link",0]); a.push(["book","Book a time for them",0]); }
       if(o.step===3){ a.push(["inspect","Log inspection complete",1]); a.push(["reschedule","Cancel this time",0]); }
       if(o.step===4) a.push(["review","Move to in review",1]);
-      if(o.step===5) a.push(["deliver","Deliver report",1]);
+      if(o.step===5){
+        if(inRevision) a.push(["deliver","Deliver revised report",1]);
+        else if(o.review&&o.review.status==="sent") a.push(["reviewback","Reviewer returned comments",0]);
+        else a.push(["deliver","Deliver report",1]);
+        if(o.review&&(o.review.status==="sent"||o.review.status==="returned")) a.push(["reviewsigned","Reviewer signed off",1]);
+        else if(!inRevision) a.push(["sendreview","Send to reviewer",0]);
+      }
+      if(o.step===4||o.step===5) a.push(["prelim","Release preliminary figures",0]);
       if(o.step===6) a.push(["invoice","Send invoice",1]);
+      if(o.step>=1&&o.step<=5) a.push(["docreq","Request documents from the client",0]);
       if(o.step<6) a.push(["hold","Place on hold",0]);
     }
-    if(role==="desk"){
-      if(o.step===2){ a.push(["renotify","Resend scheduling link",0]); a.push(["book","Book a time for them",0]); }
-      if(o.step===3) a.push(["reschedule","Cancel this time",0]);
-      if(o.step<6) a.push(["hold","Place on hold",0]);
+    if(role==="desk"||role==="admin"){
+      if(role==="desk"&&o.step===2){ a.push(["renotify","Resend scheduling link",0]); a.push(["book","Book a time for them",0]); }
+      if(role==="desk"&&o.step===3) a.push(["reschedule","Cancel this time",0]);
+      if(o.step>=6&&!inRevision) a.push(["revise","Request a revision",0]);
+      if(o.step===7&&!o.paid) a.push(["paid","Record payment",1]);
+      if(role==="desk"&&o.step<6) a.push(["hold","Place on hold",0]);
     }
     return a;
   }
 
-  return {STEPS:STEPS,CLIENT_LABEL:CLIENT_LABEL,ROLES:ROLES,REPORT_TYPES:REPORT_TYPES,PURPOSES:PURPOSES,ACCESS:ACCESS,
+  /* reminders the system owes the appraiser; returns keys due now (each at most once a day) */
+  function nudgesDue(o,nowMs){
+    if(!isOpen(o)||o.hold) return [];
+    var due=[], H=3600e3, last=function(k){ return o.nudged&&o.nudged[k]?Date.parse(o.nudged[k]):0; };
+    var upd=Date.parse(o.updatedAt||o.createdAt||0), created=Date.parse(o.createdAt||0);
+    if(o.step===0&&nowMs-created>24*H) due.push("accept");
+    if(o.step===1&&nowMs-Date.parse(o.acceptedAt||o.updatedAt)>48*H) due.push("schedule");
+    if(o.step===3&&o.apptStart&&nowMs-Date.parse(o.apptStart)>24*H) due.push("inspect");
+    if((o.step===4||o.step===5)&&o.etaDate&&nowMs>Date.parse(o.etaDate+"T23:59:59Z")) due.push("deliver");
+    if(o.step>=1&&o.step<6&&nowMs-upd>72*H) due.push("stale");
+    return due.filter(function(k){ return nowMs-last(k)>24*H; });
+  }
+
+  return {STEPS:STEPS,CLIENT_LABEL:CLIENT_LABEL,ROLES:ROLES,PRODUCTS:PRODUCTS,REPORT_TYPES:REPORT_TYPES,PURPOSES:PURPOSES,ACCESS:ACCESS,
+    LOAN_TYPES:LOAN_TYPES,PREMISES:PREMISES,OCCUPANCY:OCCUPANCY,PROPERTY_TYPES:PROPERTY_TYPES,DELIVERY_FORMATS:DELIVERY_FORMATS,REVISION_KINDS:REVISION_KINDS,PAY_METHODS:PAY_METHODS,
+    lenderName:lenderName,nudgesDue:nudgesDue,
     DOC_KINDS:DOC_KINDS,HOLD_REASONS:HOLD_REASONS,DECLINE_REASONS:DECLINE_REASONS,CANCEL_REASONS:CANCEL_REASONS,PERM:PERM,can:can,
     statusOf:statusOf,isOpen:isOpen,TZ:TZ,fmtDay:fmtDay,fmtHr:fmtHr,fmtTime:fmtTime,fmtDate:fmtDate,defaultConfig:defaultConfig,
     genSlots:genSlots,slotClashes:slotClashes,zonedToUtc:zonedToUtc,applyAction:applyAction,nextActions:nextActions,contactParty:contactParty,contactName:contactName,
     aprCap:aprCap,aprLower:aprLower,contactLine:contactLine,money:money,templates:T};
 })();
 
-/* FSB Appraisal Desk: browser app. Talks to the Worker API; CORE (above) supplies shared rules. */
+/* Appraisal Desk: browser app. Talks to the Worker API; CORE (above) supplies shared rules. */
 (function(){
   "use strict";
   var STEPS=CORE.STEPS, ROLES=CORE.ROLES, CLIENT_LABEL=CORE.CLIENT_LABEL, DOC_KINDS=CORE.DOC_KINDS;
   var S = {
     me:null, view:"board", sel:null, tab:"status", orders:[], detail:{}, config:null, feedback:[], users:[], audit:[], messages:[],
     busy:false, toastT:null, boot:"loading", bootWhy:"", token:null, client:null, invite:null, inviteCode:null, provisioned:true,
-    providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv", demo:false
+    providers:{email:false,sms:false}, filter:"active", q:"", mfilter:"manual", lastSync:"", menu:false, pollT:null, storage:"kv", demo:false, brand:{name:"Your Lender",tagline:"",primary:"#1f4984",accent:"#790000",logo:"",productName:"Appraisal Desk"}, appraisers:[]
   };
 
   /* ---------- helpers ---------- */
@@ -413,6 +552,21 @@ var CORE = (function(){
     h.split("&").forEach(function(kv){ var m=/^([a-z]+)=(.+)$/i.exec(kv); if(m) out[m[1]]=decodeURIComponent(m[2]); });
     return out;
   }
+  function lender(){ return (S.brand&&S.brand.name)||"your lender"; }
+  function shade(hex,f){ var m=/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||""); if(!m) return hex; return "#"+[1,2,3].map(function(i){ var v=Math.round(parseInt(m[i],16)*f); return ("0"+Math.max(0,Math.min(255,v)).toString(16)).slice(-2); }).join(""); }
+  function applyBrand(b){
+    if(!b) return; S.brand=b;
+    var st=$("brandvars"); if(!st){ st=document.createElement("style"); st.id="brandvars"; document.head.appendChild(st); }
+    st.textContent=":root{--navy:"+b.primary+";--navy-deep:"+shade(b.primary,0.78)+";--red:"+b.accent+"}";
+    document.title=b.name+" "+(b.productName||"Appraisal Desk");
+    var logo=document.querySelector(".logo"), wrap=document.querySelector(".topin");
+    if(b.logo){ if(!logo){ logo=document.createElement("img"); logo.className="logo"; wrap.insertBefore(logo,wrap.firstChild); var t=document.querySelector(".textlogo"); if(t) t.remove(); } logo.src=b.logo; logo.alt=b.name; }
+    else { if(logo) logo.remove(); var tl=document.querySelector(".textlogo"); if(!tl){ tl=document.createElement("div"); tl.className="textlogo"; wrap.insertBefore(tl,wrap.firstChild); } tl.innerHTML='<b>'+esc(b.name)+'</b>'+(b.tagline?'<span>'+esc(b.tagline)+'</span>':''); }
+    var h1=document.querySelector(".mast h1"), tag=document.querySelector(".mast .tag");
+    if(h1) h1.textContent=b.productName||"Appraisal Desk";
+    if(tag) tag.textContent="Order intake, live status, inspection scheduling and report delivery between "+b.name+" and its appraisers.";
+  }
+  function brandline(){ return '<p class="brandline">'+esc(lender())+(S.brand.tagline?' &middot; '+esc(S.brand.tagline):'')+'</p>'; }
   function homeFor(role){ return role==="appraiser"?"queue":(role==="admin"?"people":"board"); }
   function navFor(role){
     if(role==="desk")      return [["board","Order board"],["new","New order"],["outbox","Outbox"],["feedback","Feedback"]];
@@ -452,7 +606,7 @@ var CORE = (function(){
     return Promise.all(p).then(render).catch(fail);
   }
   function afterSignIn(user,sessionData){
-    S.me=user; S.config=(sessionData&&sessionData.config)||S.config||CORE.defaultConfig();
+    S.me=user; S.config=(sessionData&&sessionData.config)||S.config||CORE.defaultConfig(); if(sessionData&&sessionData.appraisers) S.appraisers=sessionData.appraisers; if(sessionData&&sessionData.brand) applyBrand(sessionData.brand);
     var h=readHash(); S.view=homeFor(user.role);
     render();
     loadOrders(true).then(function(){
@@ -467,14 +621,14 @@ var CORE = (function(){
       return api("GET","/api/invite/"+encodeURIComponent(h.invite)).then(function(d){ S.invite=d; render(); }).catch(function(e){ S.invite={error:e.message}; render(); });
     }
     api("GET","/api/session").then(function(d){
-      S.boot="ready"; S.provisioned=d.provisioned!==false; S.providers=d.providers||S.providers; S.storage=d.storage||"kv"; S.demo=!!d.demo;
+      S.boot="ready"; S.provisioned=d.provisioned!==false; S.providers=d.providers||S.providers; S.storage=d.storage||"kv"; S.demo=!!d.demo; applyBrand(d.brand); S.appraisers=d.appraisers||[];
       if(S.demo){ S.mfilter="all"; demoBar(); }
       if(S.demo&&!S.provisioned){ render(); return api("POST","/api/demo/reset",{}).then(function(){ return api("GET","/api/session"); }).then(function(d2){ S.provisioned=d2.provisioned!==false; render(); }).catch(function(e){ S.boot="offline"; S.bootWhy=e.message; render(); }); }
       if(d.user) afterSignIn(d.user,d); else render();
     }).catch(function(e){ S.boot="offline"; S.bootWhy=e.message; render(); });
   }
   function loadClient(){
-    return api("GET","/api/client/"+encodeURIComponent(S.token)).then(function(d){ S.client=d; S.config={timeZone:d.tz,slotMinutes:d.slotMinutes}; S.boot="ready"; render(); })
+    return api("GET","/api/client/"+encodeURIComponent(S.token)).then(function(d){ S.client=d; S.config={timeZone:d.tz,slotMinutes:d.slotMinutes}; if(d.lender) applyBrand({name:d.lender.name,tagline:d.lender.tagline,logo:d.lender.logo,primary:d.lender.primary,accent:d.lender.accent,productName:"Appraisal Desk"}); S.boot="ready"; render(); })
       .catch(function(e){ S.client={error:e.message,status:e.status}; S.boot="ready"; render(); });
   }
 
@@ -505,7 +659,7 @@ var CORE = (function(){
       '</div></div></div>';
   }
   function mailto(m){
-    return "mailto:"+encodeURIComponent(m.to_addr||"")+"?subject="+encodeURIComponent(m.subject||"First Security Bank appraisal update")+"&body="+encodeURIComponent(m.body||"");
+    return "mailto:"+encodeURIComponent(m.to_addr||"")+"?subject="+encodeURIComponent(m.subject||(lender()+" appraisal update"))+"&body="+encodeURIComponent(m.body||"");
   }
   function smsto(m){
     var n=String(m.to_addr||"").replace(/[^\d+]/g,"");
@@ -546,7 +700,7 @@ var CORE = (function(){
       '<div class="pb"><div class="stack-s">'+DEMO_ROLES.map(function(r){ return '<button class="btn btn-p" style="width:100%;justify-content:space-between;display:flex;text-align:left" data-demo="'+r[0]+'"><span><b>'+esc(r[1])+'</b><br><span style="font-weight:400;font-size:12.5px;opacity:.85">'+esc(r[2])+'</span></span><span aria-hidden="true">&rarr;</span></button>'; }).join("")+
       '<p class="sm muted" style="margin-top:6px">To see what a borrower sees, sign in as the appraiser, open 812 N Roosevelt Ave, and use the Messages tab: the text to the borrower carries their personal link. Open it on your phone.</p>'+
       '<p class="sm muted">Password for every demo account: <span class="mono">FSBdemo-2026</span>. Sign in at any time with the email addresses shown on the People tab.</p>'+
-      '</div></div></div><p class="brandline">First Security Bank &middot; Mackinaw, Heritage Lake, Deer Creek, Danvers</p></div>';
+      '</div></div></div>'+brandline()+'</div>';
   }
 
   /* ---------- entry screens ---------- */
@@ -556,15 +710,15 @@ var CORE = (function(){
     if(S.demo&&!S.provisioned) return '<div class="panel"><div class="empty"><b>Loading the demonstration</b>Sample orders are being prepared. One moment.</div></div>';
     if(S.demo) return demoSigninHtml();
     if(!S.provisioned) return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Not yet in service</h2>'+
-      '<p class="note">This portal has been installed for First Security Bank but the bank has not yet designated its administrator. Once the bank names that person, they receive an invitation, set their password, and add everyone else.</p></div></div></div></div>';
+      '<p class="note">This portal has been installed for '+esc(lender())+' but the lender has not yet designated its administrator. Once the lender names that person, they receive an invitation, set their password, and add everyone else.</p></div></div></div></div>';
     return '<div class="signwrap"><div class="panel"><div class="ph"><div><h2>Sign in</h2>'+
-      '<p class="note">Access is granted by First Security Bank\'s portal administrator. Use the email and password you chose from your invitation. Your role (appraisal desk, loan officer, appraiser or administrator) is assigned by the bank and decides which screens you see.</p></div></div>'+
+      '<p class="note">Access is granted by the portal administrator at '+esc(lender())+'. Use the email and password you chose from your invitation. Your role (appraisal desk, loan officer, appraiser or administrator) is assigned by the lender and decides which screens you see.</p></div></div>'+
       '<div class="pb"><form class="stack" id="signinForm">'+
       '<label class="f">Work email<input id="si_email" type="email" autocomplete="username" inputmode="email"></label>'+
       '<label class="f">Password<input id="si_pw" type="password" autocomplete="current-password"></label>'+
       '<div><button class="btn btn-p" type="submit" data-a="signin">Sign in</button></div>'+
-      '<p class="sm muted">Forgot your password, or never received an invitation? Ask the bank\'s portal administrator to issue a new sign-in link.</p>'+
-      '</form></div></div><p class="brandline">First Security Bank &middot; Mackinaw, Heritage Lake, Deer Creek, Danvers</p></div>';
+      '<p class="sm muted">Forgot your password, or never received an invitation? Ask the portal administrator to issue a new sign-in link.</p>'+
+      '</form></div></div>'+brandline()+'</div>';
   }
   function inviteHtml(){
     if(!S.invite) return '<div class="panel"><div class="empty"><b>Checking your invitation</b></div></div>';
@@ -586,7 +740,7 @@ var CORE = (function(){
       return '<tr><td><div class="addr">'+esc(r.name)+(me?' <span class="pill info">you</span>':'')+'<small>'+esc(r.email)+(r.phone?(' &middot; '+esc(r.phone)):'')+'</small></div></td>'+
         '<td class="sm" data-label="Role">'+(me?esc(ROLES[r.role].name):'<select data-urole="'+esc(r.id)+'">'+Object.keys(ROLES).map(function(k){ return '<option value="'+k+'"'+(k===r.role?" selected":"")+'>'+esc(ROLES[k].name)+'</option>'; }).join("")+'</select>')+'</td>'+
         '<td data-label="Status">'+how+'</td>'+
-        '<td class="sm muted" data-label="Last seen">'+esc(r.last_seen?fmtTime(r.last_seen):"never")+'</td>'+
+        '<td class="sm muted" data-label="Last seen">'+esc(r.last_seen?fmtTime(r.last_seen):"never")+credWarn(r)+'</td>'+
         '<td><div class="row">'+(me?'<span class="sm muted">Your own account</span>':
           '<button class="btn btn-s" data-uinvite="'+esc(r.id)+'">New sign-in link</button>'+
           '<button class="btn btn-s" data-uactive="'+esc(r.id)+'" data-to="'+(r.active?"0":"1")+'">'+(r.active?"Suspend":"Restore")+'</button>')+'</div></td></tr>';
@@ -595,15 +749,31 @@ var CORE = (function(){
       '<p class="note">Everyone who can sign in, and what they may do. Adding someone produces a one-time sign-in link that lasts seven days; send it to them yourself. The same button resets a forgotten password.'+(S.demo?' In this demonstration every sample account uses the password FSBdemo-2026.':'')+'</p></div>'+
       '<button class="btn btn-p" data-a="addperson">Add someone</button></div>'+
       (rows?'<div class="tablewrap"><table><thead><tr><th>Person</th><th>Role</th><th>Status</th><th>Last seen</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>':'<div class="empty"><b>Loading</b></div>')+
-      '<div class="pb"><div class="callout"><b>Roles.</b> '+Object.keys(ROLES).map(function(k){ return '<b>'+esc(ROLES[k].name)+'</b>: '+esc(ROLES[k].hint); }).join(" ")+'</div></div></div>'+
+      '<div class="pb"><div class="callout"><b>Roles</b>'+Object.keys(ROLES).map(function(k){ return '<div style="margin-top:4px"><strong>'+esc(ROLES[k].name)+'.</strong> '+esc(ROLES[k].hint)+'</div>'; }).join("")+'</div></div></div>'+
       adminSettingsHtml()+
       (S.audit.length?'<div class="panel"><div class="ph"><div><h2>Administration record</h2><p class="note">Who changed access and settings.</p></div></div><div class="pb"><div class="log">'+S.audit.map(function(a){ return '<div><b>'+esc(fmtTime(a.at))+'</b>  '+esc(a.who)+'  &middot;  '+esc(a.what)+'</div>'; }).join("")+'</div></div></div>':'');
+  }
+  function credWarn(r){
+    if(r.role!=="appraiser") return "";
+    var out=[], soon=new Date(Date.now()+45*864e5).toISOString().slice(0,10), today=nowISO().slice(0,10);
+    [["license_expires","License"],["eo_expires","E&O"]].forEach(function(k){ var d=r[k[0]]; if(!d) out.push('<span class="pill wait">'+k[1]+' date missing</span>'); else if(d<today) out.push('<span class="pill crit">'+k[1]+' expired '+esc(fmtDate(d))+'</span>'); else if(d<soon) out.push('<span class="pill manual">'+k[1]+' expires '+esc(fmtDate(d))+'</span>'); });
+    return out.length?'<div class="row" style="margin-top:4px">'+out.join("")+'</div>':'';
+  }
+  function brandSettingsHtml(){
+    var b=S.brand||{};
+    return '<div class="panel"><div class="ph"><div><h2>Lender branding</h2><p class="note">How the portal presents itself to staff, borrowers and agents. Every message is sent in this name.</p></div>'+
+      '<button class="btn btn-p btn-s" data-a="savebrand">Save</button></div><div class="pb"><div class="stack">'+
+      '<div class="grid3"><label class="f">Lender name<input id="br_name" value="'+esc(b.name||"")+'"></label><label class="f">Short name<input id="br_short" value="'+esc(b.short||"")+'"></label><label class="f">Product name<input id="br_product" value="'+esc(b.productName||"Appraisal Desk")+'"></label></div>'+
+      '<div class="grid2"><label class="f">Tagline or locations (shown under the logo and on client pages)<input id="br_tagline" value="'+esc(b.tagline||"")+'"></label><label class="f">Time zone<input id="br_tz" value="'+esc(b.timeZone||"America/Chicago")+'" placeholder="America/Chicago"></label></div>'+
+      '<div class="grid3"><label class="f">Primary color<input id="br_primary" type="color" value="'+esc(b.primary||"#1f4984")+'"></label><label class="f">Accent color<input id="br_accent" type="color" value="'+esc(b.accent||"#790000")+'"></label>'+
+      '<label class="f">Logo (PNG, JPG, SVG under 1 MB)<input id="br_logo" type="file" accept=".png,.jpg,.jpeg,.webp,.svg"></label></div>'+
+      '</div></div></div>';
   }
   function adminSettingsHtml(){
     var c=S.config||CORE.defaultConfig(), list=c.deskCopyEmails||[];
     var email=S.providers.email?('<span class="pill ok">Email sending automatically'+(S.providers.emailVia==="cloudflare"?" via Cloudflare":"")+'</span>'):'<span class="pill manual">Email by hand from the Outbox</span>';
     var sms=S.providers.sms?'<span class="pill ok">Texts sending automatically</span>':'<span class="pill manual">Texts by hand (carrier registration pending)</span>';
-    return '<div class="panel"><div class="ph"><div><h2>Bank settings</h2><p class="note">Who is copied on desk notices, and how messages leave the portal.</p></div>'+
+    return brandSettingsHtml()+'<div class="panel"><div class="ph"><div><h2>Notifications</h2><p class="note">Who is copied on desk notices, and how messages leave the portal.</p></div>'+
       '<button class="btn btn-p btn-s" data-a="savebank">Save</button></div><div class="pb"><div class="stack">'+
       '<div class="row">'+email+sms+'</div>'+
       '<div><p class="lbl" style="margin-bottom:7px">Copy these addresses on every desk notice</p>'+
@@ -623,12 +793,12 @@ var CORE = (function(){
       "Add and create link","saveperson");
   }
   function inviteLinkSheet(name,email,link,days){
-    var body="Hello "+name+",\n\nYou have been given access to the First Security Bank Appraisal Desk. Open this link to choose your password (it works once and expires in "+days+" days):\n\n"+link+"\n\nAfter that, sign in at "+location.origin+location.pathname+" with your work email.";
+    var body="Hello "+name+",\n\nYou have been given access to the "+lender()+" Appraisal Desk. Open this link to choose your password (it works once and expires in "+days+" days):\n\n"+link+"\n\nAfter that, sign in at "+location.origin+location.pathname+" with your work email.";
     return '<div class="sheet" data-a="closesheet"><div class="sheetc" data-stop="1"><div class="stack">'+
       '<div><h2 style="font-size:17px">Sign-in link for '+esc(name)+'</h2><p class="sm muted" style="margin-top:3px">Send this to '+esc(email)+'. It works once and expires in '+days+' days. It is not shown again, but you can issue a new one at any time.</p></div>'+
       '<div class="invlink">'+esc(link)+'</div>'+
       '<div class="row"><button class="btn btn-p" data-copy="'+esc(link)+'" data-what="Link">Copy link</button>'+
-      '<a class="btn" href="mailto:'+esc(encodeURIComponent(email))+'?subject='+esc(encodeURIComponent("Your FSB Appraisal Desk sign-in"))+'&body='+esc(encodeURIComponent(body))+'">Send by email</a>'+
+      '<a class="btn" href="mailto:'+esc(encodeURIComponent(email))+'?subject='+esc(encodeURIComponent("Your "+lender()+" Appraisal Desk sign-in"))+'&body='+esc(encodeURIComponent(body))+'">Send by email</a>'+
       '<button class="btn" data-a="closesheet">Done</button></div></div></div></div>';
   }
 
@@ -640,12 +810,15 @@ var CORE = (function(){
       if(f==="attention"&&!(o.hold||o.unsent||(o.step===0)||(o.due&&o.step<6&&CORE.isOpen(o)&&o.due<nowISO().slice(0,10)))) return false;
       if(f==="delivered"&&!(o.step>=6&&!o.cancelled&&!o.declined)) return false;
       if(f==="closed"&&!(o.cancelled||o.declined||o.step===STEPS.length-1)) return false;
+      if(f==="unpaid"&&!(o.step===7&&!o.paid)) return false;
+      if(f==="mine"&&!(S.me&&o.assignedTo===S.me.id)) return false;
       if(q){ var hay=[o.addr,o.city,o.loan,o.borrowerName,o.agentName,o.type,o.id,o.officerName].join(" ").toLowerCase(); if(hay.indexOf(q)===-1) return false; }
       return true;
     });
   }
   function filtersHtml(){
-    var fs=[["active","Active"],["attention","Needs attention"],["delivered","Delivered"],["closed","Closed"],["all","All"]];
+    var fs=[["active","Active"],["attention","Needs attention"],["delivered","Delivered"],["unpaid","Awaiting payment"],["closed","Closed"],["all","All"]];
+    if(S.me&&S.me.role==="appraiser"&&S.appraisers.length>1) fs.splice(1,0,["mine","Mine"]);
     return '<div class="filters">'+fs.map(function(f){ return '<button data-filter="'+f[0]+'" aria-pressed="'+(S.filter===f[0])+'">'+f[1]+'</button>'; }).join("")+
       '<div class="search"><input id="q" placeholder="Search address, borrower, loan number" value="'+esc(S.q)+'" aria-label="Search orders"></div></div>';
   }
@@ -659,10 +832,10 @@ var CORE = (function(){
       return '<tr data-open="'+esc(o.id)+'"'+(o.id===S.sel?' aria-current="true"':'')+'>'+
         '<td><button class="addrbtn" data-open="'+esc(o.id)+'"><span class="addr">'+esc(o.addr)+'<small>'+esc(o.city)+'</small></span></button></td>'+
         '<td class="mono sm muted" data-label="Order">'+esc(o.id.slice(0,12))+'</td>'+
-        '<td class="sm" data-label="Type">'+esc(o.type)+'</td>'+
+        '<td class="sm" data-label="Type">'+esc(o.type)+(S.appraisers.length>1?'<br><span class="muted">'+esc(o.assignedName||"Unassigned")+'</span>':'')+'</td>'+
         '<td class="sm" data-label="Borrower">'+esc(o.borrowerName||"")+'</td>'+
         '<td data-label="Status">'+rail(o)+pill(o)+(o.unsent?'<span class="pill manual" title="Messages waiting to be sent by hand">'+o.unsent+' to send</span>':'')+'</td>'+
-        '<td class="mono sm'+(late?'" style="color:var(--red);font-weight:700':'')+'" data-label="Due">'+esc(fmtDate(o.due))+(late?" late":"")+'</td></tr>';
+        '<td class="mono sm'+(late?'" style="color:var(--red);font-weight:700':'')+'" data-label="Due">'+esc(fmtDate(o.due))+(late?" late":"")+(o.etaDate&&CORE.isOpen(o)&&o.step<6?'<br><span class="muted">ETA '+esc(fmtDate(o.etaDate))+'</span>':'')+'</td></tr>';
     }).join("");
     return head+'<div class="tablewrap"><table><thead><tr><th>Property</th><th>Order</th><th>Type</th><th>Borrower</th><th>Status</th><th>Due</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
   }
@@ -671,7 +844,7 @@ var CORE = (function(){
   function docsHtml(o){
     var docs=o.docs||[], canUp=can("docs")&&!o.cancelled, role=S.me.role;
     var list=docs.length? docs.map(function(d){
-      var kind=(DOC_KINDS[d.kind]||DOC_KINDS.other).name;
+      var kind=d.uploaded_role==="client"?"From the client":(DOC_KINDS[d.kind]||DOC_KINDS.other).name;
       var canDel=(role==="admin"||role==="desk"||d.uploaded_role===role);
       var canOpen=!(role==="officer"&&["report","addendum","invoice"].indexOf(d.kind)===-1);
       return '<div class="doc"><span class="ic">'+esc((d.name.split(".").pop()||"?").slice(0,4).toUpperCase())+'</span>'+
@@ -727,7 +900,12 @@ var CORE = (function(){
       else if(o.step===0) nextc='<div class="callout"><b>Waiting on the appraiser</b> to accept or decline.</div>';
       else if(o.step===2) nextc='<div class="callout"><b>Waiting on '+esc(CORE.contactName(o))+'</b> to pick an inspection time from their link. Resend the link if they have not, or book a time for them after a phone call.</div>';
       else if(o.step===3) nextc='<div class="callout"><b>Inspection booked</b> for '+esc(fmtDay(o.apptStart))+', '+esc(fmtHr(o.apptStart))+'.</div>';
+      else if(o.step===5&&o.revision&&!o.revision.resolvedAt) nextc='<div class="callout warn"><b>Revision '+o.revision.n+' requested</b> by '+esc(o.revision.by)+' on '+esc(fmtTime(o.revision.requestedAt))+' ('+esc(o.revision.kind)+'): '+esc(o.revision.text)+'</div>';
+      else if(o.step===5&&o.review&&o.review.status==="sent") nextc='<div class="callout"><b>With the reviewer</b> ('+esc(o.review.name||"reviewing appraiser")+') since '+esc(fmtTime(o.review.sentAt))+(o.review.eta?', expected back '+esc(fmtDate(o.review.eta)):'')+'.</div>';
+      else if(o.step===5&&o.review&&o.review.status==="returned") nextc='<div class="callout"><b>Reviewer returned comments</b>'+(o.review.comments?': '+esc(o.review.comments):'.')+' Revise and record the sign-off.</div>';
       else if(o.step===6) nextc='<div class="callout"><b>Report delivered.</b> The borrower copy '+((o.consent&&o.consent.borrower)?'was opened electronically on '+esc(fmtTime(o.consent.borrower.at))+'.':'has not been opened yet; if they do not, provide a paper copy.')+'</div>';
+      else if(o.step===7&&o.paid) nextc='<div class="callout"><b>Paid.</b> '+esc(money(o.paid.amount))+' by '+esc(o.paid.method)+(o.paid.ref?', reference '+esc(o.paid.ref):'')+', recorded '+esc(fmtTime(o.paid.at))+' by '+esc(o.paid.by)+'.</div>';
+      else if(o.step===7) nextc='<div class="callout"><b>Invoiced.</b> Record the payment here when it goes out so the appraiser stops asking.</div>';
       body='<div class="stack">'+nextc+timelineHtml(o)+actionsHtml(o)+
         (can("ask")&&CORE.isOpen(o)?'<div class="stack-s"><p class="lbl">Ask the appraiser</p><label class="f"><textarea id="qbox" placeholder="Additional property information, a factual correction, or a timing question."></textarea></label><div><button class="btn btn-s" data-a="ask">Send to appraiser</button></div><div class="callout"><b>Value cannot be discussed.</b> Questions are limited to factual corrections and additional property information. Every message is logged on the Record tab.</div></div>':'')+
         (role==="appraiser"&&CORE.isOpen(o)?'<div class="stack-s"><p class="lbl">Reply to the desk</p><label class="f"><textarea id="rbox" placeholder="Answer a question or flag something the desk needs to know."></textarea></label><div><button class="btn btn-s" data-a="reply">Send to desk</button></div></div>':'')+
@@ -745,10 +923,18 @@ var CORE = (function(){
         '<dt>Access</dt><dd>'+esc(o.accessVia||"Borrower")+'</dd>'+
         '<dt>Ordered by</dt><dd>'+esc(o.orderedBy||"")+'<span class="tiny">'+esc(fmtTime(o.orderedAt))+'</span></dd>'+
         (o.officerName?'<dt>Loan officer</dt><dd>'+esc(o.officerName)+(o.officerEmail?'<span class="tiny">'+esc(o.officerEmail)+'</span>':"")+'</dd>':"")+
-        '<dt>Fee</dt><dd class="mono">'+(o.fee?money(o.fee):"not set")+'</dd>'+
-        '<dt>Due</dt><dd class="mono">'+esc(fmtDate(o.due))+(o.rush?' <span class="flag">Rush</span>':'')+'</dd>'+appt+
-        (o.appraiserName?'<dt>Appraiser</dt><dd>'+esc(o.appraiserName)+'</dd>':"")+
+        '<dt>Fee</dt><dd class="mono">'+(o.fee?money(o.fee):"not quoted")+'</dd>'+
+        '<dt>Needed by</dt><dd class="mono">'+esc(fmtDate(o.due))+(o.rush?' <span class="flag">Rush</span>':'')+(o.closingDate?'<span class="tiny">Closing '+esc(fmtDate(o.closingDate))+'</span>':'')+(o.earliestInspection?'<span class="tiny">Inspect on or after '+esc(fmtDate(o.earliestInspection))+'</span>':'')+'</dd>'+
+        (o.etaDate?'<dt>Committed</dt><dd class="mono">'+esc(fmtDate(o.etaDate))+'</dd>':'')+appt+
+        '<dt>Appraiser</dt><dd>'+esc(o.assignedName||o.appraiserName||"Unassigned")+(can("assign")&&S.appraisers.length>1&&o.step<6&&CORE.isOpen(o)?'<span class="tiny"><button class="btn btn-s" style="margin-top:4px" data-a="assign">'+(o.assignedTo?"Reassign":"Assign")+'</button></span>':'')+'</dd>'+
+        ((o.loanType||o.premise||o.propertyType||o.occupancy)?'<dt>Assignment</dt><dd>'+esc([o.loanType,o.propertyType&&(o.propertyType+(o.units?" ("+o.units+" units)":"")),o.occupancy].filter(Boolean).join(" · "))+(o.premise?'<span class="tiny">'+esc(o.premise)+'</span>':'')+(o.deliveryFormat&&o.deliveryFormat!=="PDF"?'<span class="tiny">'+esc(o.deliveryFormat)+'</span>':'')+'</dd>':'')+
+        ((o.pins||o.refNo)?'<dt>References</dt><dd class="sm">'+(o.refNo?'Ref '+esc(o.refNo):'')+(o.pins?'<span class="tiny mono">PIN '+esc(o.pins)+'</span>':'')+'</dd>':'')+
+        (o.groupRef?'<dt>Group</dt><dd class="sm">'+esc(o.groupRef)+(o.combinedReport?'<span class="tiny">Combined report and invoice</span>':'')+'</dd>':'')+
+        (o.prelim?'<dt>Preliminary</dt><dd class="sm">'+(o.prelim.value?esc(money(o.prelim.value)):'fee only')+'<span class="tiny">released '+esc(fmtTime(o.prelim.at))+'</span></dd>':'')+
+        (o.docRequest?'<dt>Docs requested</dt><dd class="sm">'+esc(o.docRequest.items)+'<span class="tiny">'+esc(fmtTime(o.docRequest.at))+'</span></dd>':'')+
       '</dl>'+links+
+      (o.accessNotes?'<div class="msg"><b>Access</b><div>'+esc(o.accessNotes)+'</div></div>':"")+
+      (o.intendedUse?'<div class="msg"><b>Intended use and requirements</b><div style="white-space:pre-wrap">'+esc(o.intendedUse)+'</div></div>':"")+
       (o.notes?'<div class="msg"><b>Notes from the desk</b><div style="white-space:pre-wrap">'+esc(o.notes)+'</div></div>':"")+
       (o.attestation?'<div class="msg own"><b>Recusal attestation on file</b>'+esc(o.orderedBy)+' attested at order placement: "I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction." Recorded '+esc(fmtTime(o.orderedAt))+'.</div>':"")+
       '</div></div></div></div>';
@@ -763,12 +949,30 @@ var CORE = (function(){
         '<label class="f">City, state, ZIP<input id="'+p+'_city" placeholder="Bloomington, IL 61701" value="'+g("city")+'"></label></div>'+
       '<div class="grid3">'+
         '<label class="f">Loan number<input id="'+p+'_loan" placeholder="2026-004417" value="'+g("loan")+'"></label>'+
-        '<label class="f">Report type'+sel(p+"_type",CORE.REPORT_TYPES,o.type||CORE.REPORT_TYPES[0])+'</label>'+
-        '<label class="f">Purpose'+sel(p+"_purpose",CORE.PURPOSES,o.purpose||"Purchase")+'</label></div>'+
+        '<label class="f">Your reference (file or order number)<input id="'+p+'_ref" value="'+g("refNo")+'"></label>'+
+        '<label class="f">Parcel numbers (PIN)<input id="'+p+'_pins" placeholder="07-14-302-011, 07-14-302-012" value="'+g("pins")+'"></label></div>'+
       '<div class="grid3">'+
-        '<label class="f">Due date<input id="'+p+'_due" type="date" value="'+g("due")+'"></label>'+
-        '<label class="f">Fee, if known<input id="'+p+'_fee" type="number" inputmode="decimal" placeholder="600" value="'+(o.fee?esc(o.fee):"")+'"></label>'+
+        '<label class="f">Product'+sel(p+"_type",CORE.REPORT_TYPES,o.type||CORE.REPORT_TYPES[0])+'</label>'+
+        '<label class="f">Purpose'+sel(p+"_purpose",CORE.PURPOSES,o.purpose||"Purchase")+'</label>'+
+        '<label class="f">Loan type'+sel(p+"_loantype",[""].concat(CORE.LOAN_TYPES),o.loanType||"")+'</label></div>'+
+      '<div class="grid3">'+
+        '<label class="f">Property type'+sel(p+"_ptype",[""].concat(CORE.PROPERTY_TYPES),o.propertyType||"")+'</label>'+
+        '<label class="f">Units<input id="'+p+'_units" type="number" inputmode="numeric" min="0" max="500" value="'+(o.units?esc(o.units):"")+'"></label>'+
+        '<label class="f">Occupancy'+sel(p+"_occ",[""].concat(CORE.OCCUPANCY),o.occupancy||"")+'</label></div>'+
+      '<div class="grid3">'+
+        '<label class="f">Valuation premise'+sel(p+"_premise",CORE.PREMISES,o.premise||"As is")+'</label>'+
+        '<label class="f">Delivery format'+sel(p+"_fmt",CORE.DELIVERY_FORMATS,o.deliveryFormat||"PDF")+'</label>'+
         '<label class="f">Rush?<select id="'+p+'_rush"><option'+(o.rush?"":" selected")+'>No</option><option'+(o.rush?" selected":"")+'>Yes</option></select></label></div>'+
+      '<div class="grid3">'+
+        '<label class="f">Closing or target date<input id="'+p+'_closing" type="date" value="'+g("closingDate")+'"></label>'+
+        '<label class="f">Report needed by<input id="'+p+'_due" type="date" value="'+g("due")+'"></label>'+
+        '<label class="f">Earliest inspection date<input id="'+p+'_earliest" type="date" value="'+g("earliestInspection")+'"></label></div>'+
+      '<div class="grid3">'+
+        '<label class="f">Fee, if agreed<input id="'+p+'_fee" type="number" inputmode="decimal" placeholder="Leave blank for the appraiser to quote" value="'+(o.fee?esc(o.fee):"")+'"></label>'+
+        (S.appraisers.length>1?'<label class="f">Assign to'+sel(p+"_assign",[""].concat(S.appraisers.map(function(a){ return a.name; })),o.assignedName||"")+'</label>':'<div></div>')+
+        '<label class="f">Part of a multi-property order? Group reference<input id="'+p+'_group" placeholder="Same reference on each property" value="'+g("groupRef")+'"></label></div>'+
+      '<label class="chk"><input type="checkbox" id="'+p+'_combined"'+(o.combinedReport?" checked":"")+'>Properties in this group should be combined into one report and one invoice</label>'+
+      '<label class="f">Intended use and any lender requirements<textarea id="'+p+'_use" placeholder="Intended use, intended users, engagement wording, lender-specific requirements">'+g("intendedUse")+'</textarea></label>'+
       '<p class="lbl" style="margin-top:2px">Who the appraiser contacts for access</p>'+
       '<div class="grid3">'+
         '<label class="f">Borrower name<input id="'+p+'_bname" value="'+g("borrowerName")+'"></label>'+
@@ -782,18 +986,24 @@ var CORE = (function(){
         '<label class="f">Access contact'+sel(p+"_access",CORE.ACCESS,o.accessVia||"Borrower")+'</label>'+
         '<label class="f">Loan officer<input id="'+p+'_oname" value="'+g("officerName")+'"></label>'+
         '<label class="f">Loan officer email<input id="'+p+'_oemail" type="email" value="'+g("officerEmail")+'"></label></div>'+
-      '<label class="f">Notes for the appraiser<textarea id="'+p+'_notes" placeholder="Tenant occupied, dog on site, gate code, anything that affects access.">'+g("notes")+'</textarea></label>';
+      '<div class="grid2"><label class="f">Access notes (gate code, dog, tenant, lockbox)<input id="'+p+'_accessnotes" value="'+g("accessNotes")+'"></label><div></div></div>'+
+      '<label class="f">Notes for the appraiser<textarea id="'+p+'_notes" placeholder="Anything else the appraiser should know.">'+g("notes")+'</textarea></label>';
   }
   function readOrderForm(p){
+    var asg=S.appraisers.filter(function(a){ return a.name===val(p+"_assign"); })[0];
     return {addr:val(p+"_addr"),city:val(p+"_city"),loan:val(p+"_loan"),type:val(p+"_type"),purpose:val(p+"_purpose"),due:val(p+"_due"),fee:Number(val(p+"_fee"))||0,rush:val(p+"_rush")==="Yes",
       borrowerName:val(p+"_bname"),borrowerPhone:val(p+"_bphone"),borrowerEmail:val(p+"_bemail"),agentName:val(p+"_aname"),agentPhone:val(p+"_aphone"),agentEmail:val(p+"_aemail"),
-      accessVia:val(p+"_access"),officerName:val(p+"_oname"),officerEmail:val(p+"_oemail"),notes:val(p+"_notes")};
+      accessVia:val(p+"_access"),officerName:val(p+"_oname"),officerEmail:val(p+"_oemail"),notes:val(p+"_notes"),
+      refNo:val(p+"_ref"),pins:val(p+"_pins"),loanType:val(p+"_loantype"),propertyType:val(p+"_ptype"),units:Number(val(p+"_units"))||0,occupancy:val(p+"_occ"),premise:val(p+"_premise"),
+      deliveryFormat:val(p+"_fmt"),closingDate:val(p+"_closing"),earliestInspection:val(p+"_earliest"),groupRef:val(p+"_group"),combinedReport:!!($(p+"_combined")&&$(p+"_combined").checked),
+      intendedUse:val(p+"_use"),accessNotes:val(p+"_accessnotes"),assignedTo:asg?asg.id:""};
   }
   function newOrderHtml(){
     return '<div class="panel"><div class="ph"><div><h2>New order</h2><p class="note">One page, not a wizard. The appraiser is notified the moment you place it. You can edit it until the inspection happens, and cancel it until the report is delivered.</p></div>'+
       '<button class="btn btn-s" data-a="goboard">Cancel</button></div>'+
       '<div class="pb"><div class="stack">'+orderForm(null,"n")+
       '<label class="att" for="n_att"><input type="checkbox" id="n_att"><span class="t"><b>Required before this order can be placed</b>I will abstain from participating in any decision to approve, not approve, or set the terms of this transaction. This attestation is timestamped, tied to my account, and cannot be edited afterward.</span></label>'+
+      '<div class="callout" id="prodhint"></div>'+
       '<div class="row"><button class="btn btn-p" data-a="createorder">Place order</button><span class="sm muted">Upload the sales contract on the Documents tab once the order exists.</span></div>'+
       '</div></div></div>';
   }
@@ -822,7 +1032,7 @@ var CORE = (function(){
         '<label class="f">Name shown on messages<input id="c_aname" placeholder="Leave blank to show \'your appraiser\'" value="'+esc(c.appraiserName||"")+'"></label>'+
         '<label class="f">Callback number<input id="c_aphone" inputmode="tel" placeholder="Leave blank to point them at the bank" value="'+esc(c.appraiserPhone||"")+'"></label>'+
         '<label class="f">Appraiser email for notices<input id="c_aemail" type="email" placeholder="Used if no appraiser account exists" value="'+esc(c.appraiserEmail||"")+'"></label></div>'+
-      '<p class="sm muted" style="margin-top:7px">First Security Bank is always the sender. This is the person a borrower reaches about access and timing.</p></div>'+
+      '<p class="sm muted" style="margin-top:7px">'+esc(lender())+' is always the sender. This is the person a borrower reaches about access and timing.'+(S.me.role==="appraiser"?' These settings are yours; each appraiser has their own calendar.':' This is the default calendar; each appraiser can override it with their own.')+'</p></div>'+
       '<div><p class="lbl" style="margin-bottom:7px">Days worked</p><div class="row">'+dayNames.map(function(n,i){ var on=(c.days||[]).indexOf(i)>-1; return '<button class="btn btn-s'+(on?" btn-p":"")+'" data-day="'+i+'" aria-pressed="'+on+'">'+n+'</button>'; }).join("")+'</div></div>'+
       '<div class="grid3">'+
         '<label class="f">Day starts (hour, 8.5 = 8:30)<input id="c_start" type="number" inputmode="decimal" step="0.5" min="5" max="12" value="'+esc(c.startHour)+'"></label>'+
@@ -877,13 +1087,14 @@ var CORE = (function(){
   function clientPageHtml(){
     var c=S.client;
     if(!c) return '<div class="clientwrap"><div class="panel"><div class="empty"><b>Loading your appraisal</b>One moment.</div></div></div>';
-    if(c.error) return '<div class="clientwrap"><div class="panel"><div class="empty"><b>This link is not valid</b>It may have expired, or the file may be closed. Call your loan officer at First Security Bank and they can send you a new one.</div></div></div>';
+    if(c.error) return '<div class="clientwrap"><div class="panel"><div class="empty"><b>This link is not valid</b>It may have expired, or the file may be closed. Call your loan officer and they can send you a new one.</div></div></div>';
     var isAgent=c.party==="agent", aprName=c.appraiser.name||"The appraiser", slotM=c.slotMinutes||60;
-    var contact=c.appraiser.phone?("Questions? Call "+(c.appraiser.name||"the appraiser")+" at "+c.appraiser.phone+"."):"Questions? Contact your loan officer at First Security Bank.";
+    var LN=(c.lender&&c.lender.name)||lender();
+    var contact=c.appraiser.phone?("Questions? Call "+(c.appraiser.name||"the appraiser")+" at "+c.appraiser.phone+"."):("Questions? Contact your loan officer at "+LN+".");
     var vst=STEPS.map(function(st,i){ var cls=i<c.step?"done":(i===c.step?"now":""); return '<li class="'+cls+'"><span class="nd">'+(i<c.step?"&#10003;":"")+'</span><span class="t">'+esc(CLIENT_LABEL[st])+'</span></li>'; }).join("");
     var action;
-    if(c.cancelled) action='<div class="nextc"><h4>No longer needed</h4><p>First Security Bank has closed this appraisal request. Nothing is needed from you.</p></div>';
-    else if(c.declined) action='<div class="nextc"><h4>With the bank</h4><p>First Security Bank is arranging your appraisal. Nothing is needed from you right now.</p></div>';
+    if(c.cancelled) action='<div class="nextc"><h4>No longer needed</h4><p>'+esc(LN)+' has closed this appraisal request. Nothing is needed from you.</p></div>';
+    else if(c.declined) action='<div class="nextc"><h4>With the lender</h4><p>'+esc(LN)+' is arranging your appraisal. Nothing is needed from you right now.</p></div>';
     else if(c.hold) action='<div class="nextc"><h4>Waiting on property access</h4><p>'+esc(aprName)+' needs access arranged before the inspection can happen. Nothing is needed from you right now.</p></div>';
     else if(c.step===2) action='<div class="stack-s"><h4 class="calhead">Choose your inspection time</h4><p class="sm muted" style="margin-bottom:2px">About '+esc(slotM)+' minutes. Pick whatever suits you.</p>'+slotCal(c.slots)+'<button class="btn btn-s" data-a="noslot" style="margin-top:8px">None of these work for me</button></div>';
     else if(c.step===3) action='<div class="nextc"><h4>Your inspection is booked</h4><p class="mono" style="color:var(--ink);font-weight:700;font-size:14px;margin:5px 0 7px">'+esc(fmtDay(c.apptStart))+', '+esc(fmtHr(c.apptStart))+'</p>'+
@@ -892,15 +1103,21 @@ var CORE = (function(){
         '<div class="row" style="margin-top:10px"><a class="btn btn-s" href="/api/client/'+esc(S.token)+'/appointment.ics" download="appraisal-inspection.ics">Add to calendar</a><button class="btn btn-s" data-a="reschedule">Change this time</button></div></div>';
     else if(c.step>=6) action='<div class="nextc"><h4>Your appraisal is ready</h4><p>A copy is available to you at no charge.</p>'+
         (c.report?(c.consent?'<div style="margin-top:10px"><a class="btn btn-p btn-s" href="/f/'+esc(c.orderId)+'/'+esc(c.report.id)+'?t='+esc(S.token)+'" download="'+esc(c.report.name)+'">Download my copy</a></div>'
-          :'<div class="stack-s" style="margin-top:10px"><label class="chk"><input type="checkbox" id="consent">I agree to receive my appraisal copy electronically through this page instead of on paper. I can ask First Security Bank for a paper copy at no charge at any time.</label><div><button class="btn btn-p btn-s" data-a="consent">Continue to my copy</button></div></div>')
+          :'<div class="stack-s" style="margin-top:10px"><label class="chk"><input type="checkbox" id="consent">I agree to receive my appraisal copy electronically through this page instead of on paper. I can ask '+esc(LN)+' for a paper copy at no charge at any time.</label><div><button class="btn btn-p btn-s" data-a="consent">Continue to my copy</button></div></div>')
           :'<p class="sm muted" style="margin-top:8px">Your loan officer will provide your copy.</p>')+'</div>';
     else if(c.step<=1) action='<div class="nextc"><h4>Nothing to do yet</h4><p>'+esc(aprName)+' will send a link to choose an inspection time. You will get a text and an email.</p></div>';
-    else action='<div class="nextc"><h4>Nothing to do right now</h4><p>Your report is being prepared. You will hear from First Security Bank when it is delivered.</p></div>';
+    else action='<div class="nextc"><h4>Nothing to do right now</h4><p>Your report is being prepared. You will hear from '+esc(LN)+' when it is delivered.</p></div>';
+    var uploads='';
+    if(c.docRequest||(c.uploaded&&c.uploaded.length)){
+      uploads='<div class="stack-s" style="margin-top:14px"><h4 class="calhead">Documents for the appraiser</h4>'+(c.docRequest?'<p class="sm">'+esc(c.appraiser.name||"The appraiser")+' has asked for: <b>'+esc(c.docRequest)+'</b></p>':'')+
+        ((c.uploaded||[]).length?'<p class="sm muted">Received: '+c.uploaded.map(function(u){ return esc(u.name); }).join(", ")+'</p>':'')+
+        (!c.cancelled&&c.step<6?'<button type="button" class="drop"><b>Tap to choose files</b><span>PDF, photos, Word or Excel. 20 MB each.</span><input type="file" class="vh" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.docx,.xlsx,.csv,.txt"></button>':'')+'</div>';
+    }
     return '<div class="clientwrap"><div class="panel"><div class="pb">'+
       '<p class="lbl">Appraisal status'+(isAgent?' &middot; listing agent':'')+'</p><h2 style="font-size:19px;margin-top:3px">'+esc(c.addr)+'</h2><p class="sm muted">'+esc(c.city)+'</p>'+
-      '<ul class="vst" style="margin-top:14px">'+vst+'</ul><div style="margin-top:14px">'+action+'</div>'+
+      '<ul class="vst" style="margin-top:14px">'+vst+'</ul><div style="margin-top:14px">'+action+'</div>'+uploads+
       '<p class="sm muted" style="margin-top:16px;line-height:1.5">'+esc(contact)+' This link is personal to '+esc(c.who)+' and stops working when the file closes.</p>'+
-      '</div></div><p class="sm muted" style="text-align:center;margin-top:12px">First Security Bank &middot; Mackinaw, Heritage Lake, Deer Creek, Danvers</p></div>';
+      '</div></div><p class="sm muted" style="text-align:center;margin-top:12px">'+esc(LN)+((c.lender&&c.lender.tagline)?' &middot; '+esc(c.lender.tagline):'')+'</p></div>';
   }
 
   /* ---------- render ---------- */
@@ -910,7 +1127,7 @@ var CORE = (function(){
     var band=document.querySelector(".band"), mast=document.querySelector(".mast"), foot=document.querySelector("footer");
     if(S.token){
       band.hidden=true; mast.hidden=true; foot.hidden=true; nav.innerHTML=""; who.innerHTML=""; fbtn.hidden=true;
-      stage.innerHTML=clientPageHtml(); return;
+      stage.innerHTML=clientPageHtml(); wireDrop(); return;
     }
     band.hidden=false; mast.hidden=false; foot.hidden=false;
     if(S.inviteCode){ nav.innerHTML='<button role="tab" aria-selected="true" disabled>Welcome</button>'; who.innerHTML=""; fbtn.hidden=true; stage.innerHTML=inviteHtml(); return; }
@@ -922,7 +1139,7 @@ var CORE = (function(){
     }
     fbtn.hidden=false;
     who.innerHTML='<button class="chip act" data-a="menu" aria-haspopup="true" aria-expanded="'+S.menu+'"><b>'+esc(S.me.name)+'</b> &middot; '+esc((ROLES[S.me.role]||{}).name||S.me.role)+'</button>'+
-      (S.menu?'<div class="menu" data-stop="1">'+(S.demo?'<button data-a="demoreset">Reset the demonstration</button>':'<button data-a="changepw">Change my password</button>')+'<button data-a="signout">Sign out</button></div>':'');
+      (S.menu?'<div class="menu" data-stop="1">'+(S.me.role==="appraiser"?'<button data-a="myprofile">My profile and credentials</button>':'')+(S.demo?'<button data-a="demoreset">Reset the demonstration</button>':'<button data-a="changepw">Change my password</button>')+'<button data-a="signout">Sign out</button></div>':'');
     nav.innerHTML=navFor(S.me.role).map(function(i){ return '<button role="tab" data-v="'+i[0]+'" aria-selected="'+(S.view===i[0])+'">'+esc(i[1])+'</button>'; }).join("");
 
     var v=S.view, html="";
@@ -945,7 +1162,7 @@ var CORE = (function(){
       Object.keys(keep).forEach(function(id){ var el=stage.querySelector("#"+CSS.escape(id)); if(!el) return; if(el.type==="checkbox"||el.type==="radio") el.checked=keep[id]; else if(keep[id]!=="") el.value=keep[id]; });
       if(focusId){ var f2=stage.querySelector("#"+CSS.escape(focusId)); if(f2){ f2.focus(); if(selStart!=null&&f2.setSelectionRange) try{ f2.setSelectionRange(selStart,selEnd); }catch(e2){} } }
     }catch(e){}
-    wireDrop();
+    wireDrop(); prodHint();
   }
 
   /* ---------- uploads ---------- */
@@ -960,6 +1177,12 @@ var CORE = (function(){
     });
   }
   function handleFiles(files){
+    if(S.token){
+      var cl=Array.prototype.slice.call(files||[]); if(!cl.length) return;
+      var cfd=new FormData(); cl.forEach(function(f){ cfd.append("file",f,f.name); });
+      toast("Uploading.");
+      api("POST","/api/client/"+encodeURIComponent(S.token)+"/docs",cfd,true).then(function(d){ toast("<b>"+esc(d.reply)+"</b>"); return loadClient(); }).catch(fail); return;
+    }
     var o=current(); if(!o){ toast("Open an order first."); return; }
     var list=Array.prototype.slice.call(files||[]); if(!list.length) return;
     var kind=val("up_kind")||"other", vis=$("up_vis")&&$("up_vis").checked;
@@ -1001,10 +1224,19 @@ var CORE = (function(){
       '<label class="f">Detail, optional<textarea id="x_note"></textarea></label>',
       "Cancel the order","docancel",' data-from="'+from+'"'));
     if(a==="accept") return modal(sheet("Accept this order",
-      '<p class="sm muted">The desk is notified, and the borrower gets their status link by text and email'+(o.fee?'':'; set the fee now if you know it')+'.</p>'+
-      '<label class="f">Fee<input id="a_fee" type="number" inputmode="decimal" value="'+(o.fee||"")+'" placeholder="Leave blank to set later"></label>'+
-      (o.due?'<p class="sm">Due <b>'+esc(fmtDate(o.due))+'</b>'+(o.rush?' <span class="flag">Rush</span>':'')+'. If that is not workable, decline with the reason instead.</p>':''),
+      '<p class="sm muted">The desk is notified with your fee and delivery date, and the borrower gets their status link by text and email. If the date they need is not workable, say so in the note or decline with the reason.</p>'+
+      '<div class="grid2"><label class="f">Fee<input id="a_fee" type="number" inputmode="decimal" value="'+(o.fee||"")+'" placeholder="Quote"></label>'+
+      '<label class="f">Expected delivery<input id="a_eta" type="date" value="'+esc(o.etaDate||o.due||"")+'"></label></div>'+
+      (o.due||o.closingDate?'<p class="sm">Needed by <b>'+esc(fmtDate(o.due))+'</b>'+(o.closingDate?', closing '+esc(fmtDate(o.closingDate)):'')+(o.rush?' <span class="flag">Rush</span>':'')+'.</p>':'')+
+      '<label class="f">Note to the desk, optional<input id="a_note" placeholder="Example: fee assumes as-is; construction draw not included"></label>',
       "Accept order","doaccept",' data-from="'+from+'"'));
+    if(a==="sendreview") return modal(sheet("Send to reviewer",'<p class="sm muted">Tells the desk the report is complete and with a reviewing or supervising appraiser, so nobody has to ask.</p><div class="grid2"><label class="f">Reviewer<input id="rv_name" placeholder="Name"></label><label class="f">Expected back<input id="rv_eta" type="date"></label></div><label class="f">Note, optional<input id="rv_note"></label>',"Record","dosendreview"));
+    if(a==="reviewback") return modal(sheet("Reviewer comments",'<label class="f">What came back<textarea id="rv_text" placeholder="Page references and corrections"></textarea></label>',"Record","doreviewback"));
+    if(a==="reviewsigned") return act(o,"reviewsigned",{},from);
+    if(a==="prelim") return modal(sheet("Release preliminary figures",'<p class="sm muted">For the lender\'s closing figures only. The record shows they were released before the signed report, which controls.</p><div class="grid2"><label class="f">Fee<input id="pl_fee" type="number" inputmode="decimal" value="'+(o.fee||"")+'"></label><label class="f">Preliminary value, optional<input id="pl_value" type="number" inputmode="decimal"></label></div>',"Release to the desk","doprelim"));
+    if(a==="revise") return modal(sheet("Request a revision",'<p class="sm muted">The appraiser is notified and the file goes back to In review until the revised report is delivered.</p><label class="f">Kind'+sel("rv_kind",CORE.REVISION_KINDS,CORE.REVISION_KINDS[0])+'</label><label class="f">What needs to change<textarea id="rv_req" placeholder="Page, item and the correction needed"></textarea></label>',"Send request","dorevise"));
+    if(a==="paid") return modal(sheet("Record payment",'<div class="grid3"><label class="f">Amount<input id="py_amt" type="number" inputmode="decimal" value="'+(o.fee||"")+'"></label><label class="f">Method'+sel("py_method",CORE.PAY_METHODS,"Check")+'</label><label class="f">Check or reference number<input id="py_ref"></label></div>',"Record","dopaid"));
+    if(a==="docreq") return modal(sheet("Request documents from "+CORE.contactName(o),'<p class="sm muted">They get a text and an email with an upload link on their status page; what they send lands on the Documents tab.</p><label class="f">What you need<textarea id="dq_items" placeholder="Current leases, last twelve months of expenses, insurance declaration">'+esc((CORE.PRODUCTS.filter(function(x){ return x.name===o.type; })[0]||{}).needs||"")+'</textarea></label>',"Send request","dodocreq"));
     if(a==="book"){
       var local=new Date(Date.now()+864e5); local.setMinutes(0,0,0);
       return modal(sheet("Book a time for "+CORE.contactName(o),
@@ -1070,6 +1302,8 @@ var CORE = (function(){
     }).catch(fail).then(function(){ S.busy=false; });
   }
   document.addEventListener("input",function(e){ if(e.target&&e.target.id==="q"){ S.q=e.target.value; render(); } });
+  function prodHint(){ var h=$("prodhint"), t=val("n_type"); if(!h) return; var pr=CORE.PRODUCTS.filter(function(x){ return x.name===t; })[0]; h.innerHTML=pr?('<b>'+esc(pr.name)+'.</b> '+(pr.xml?'Usually delivered with an XML (UAD) file. ':'')+(pr.needs?('The appraiser will need: '+esc(pr.needs)):'')):''; }
+  document.addEventListener("change",function(e){ if(e.target&&e.target.id==="n_type") prodHint(); });
   document.addEventListener("keydown",function(e){ if(e.key==="Escape"){ if($("modal").innerHTML){ modal(""); } if(S.menu){ S.menu=false; render(); } } });
 
   document.addEventListener("click",function(e){
@@ -1103,12 +1337,16 @@ var CORE = (function(){
     if(a==="retry"){ S.boot="loading"; render(); boot(); return; }
     if(a==="signin"){ submitSignin(); return; }
     if(a==="acceptinvite"){ acceptInvite(); return; }
-    if(a==="signout"){ api("POST","/api/logout",{}).catch(function(){}).then(function(){ S.me=null; S.sel=null; S.orders=[]; S.detail={}; S.menu=false; S.lastSync=""; render(); }); return; }
+    if(a==="signout"){ api("POST","/api/logout",{}).catch(function(){}).then(function(){ S.me=null; S.sel=null; S.orders=[]; S.detail={}; S.menu=false; S.lastSync=""; S.filter="active"; S.q=""; S.view="board"; render(); }); return; }
     if(a==="changepw"){ modal(sheet("Change my password",'<label class="f">Current password<input id="cp_cur" type="password" autocomplete="current-password"></label><label class="f">New password (10 characters or more)<input id="cp_new" type="password" autocomplete="new-password"></label>',"Change","dochangepw")); return; }
     if(a==="dochangepw"){ api("POST","/api/password",{current:($("cp_cur")||{}).value||"",next:($("cp_new")||{}).value||""}).then(function(){ modal(""); toast("Password changed."); }).catch(fail); return; }
     if(a==="addperson"){ modal(personSheet()); return; }
     if(a==="addcopy"){ var ce=val("b_copy").toLowerCase(); if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ce)){ toast("Enter a valid email address."); return; } S.config=S.config||CORE.defaultConfig(); S.config.deskCopyEmails=S.config.deskCopyEmails||[]; if(S.config.deskCopyEmails.indexOf(ce)===-1) S.config.deskCopyEmails.push(ce); var bi=$("b_copy"); if(bi) bi.value=""; render(); return; }
     if(t.dataset.copyoff){ S.config.deskCopyEmails=(S.config.deskCopyEmails||[]).filter(function(x){ return x!==t.dataset.copyoff; }); render(); return; }
+    if(a==="savebrand"){ var body={name:val("br_name"),short:val("br_short"),productName:val("br_product"),tagline:val("br_tagline"),timeZone:val("br_tz"),primary:val("br_primary"),accent:val("br_accent")};
+      var lf=$("br_logo"); var pr=api("PUT","/api/brand",body);
+      if(lf&&lf.files&&lf.files[0]){ var bfd=new FormData(); bfd.append("file",lf.files[0],lf.files[0].name); pr=pr.then(function(){ return api("POST","/api/brand/logo",bfd,true); }); }
+      pr.then(function(d){ applyBrand(d.brand); render(); toast("Branding saved."); }).catch(fail); return; }
     if(a==="savebank"){ var cc=S.config||CORE.defaultConfig(); api("PUT","/api/config",cc).then(function(d){ S.config=d.config; render(); toast("Bank settings saved."); }).catch(fail); return; }
     if(a==="saveperson"){ var pn=val("p_name"), pe=val("p_email"), pr=val("p_role"), pp=val("p_phone"); if(!pn||!pe){ toast("Name and email are required."); return; }
       api("POST","/api/users",{name:pn,email:pe,role:pr,phone:pp}).then(function(d){ modal(inviteLinkSheet(pn,pe,d.inviteLink,d.expiresDays)); return loadUsers(); }).then(render).catch(fail); return; }
@@ -1125,13 +1363,23 @@ var CORE = (function(){
     if(a==="donote"){ if(!o) return; var nt=val("nt_text"); if(!nt){ toast("Write a note first."); return; } act(o,"note",{text:nt}); return; }
     if(a==="setfee"){ modal(sheet("Set the fee",'<label class="f">Fee<input id="f_fee" type="number" inputmode="decimal" value="'+(o&&o.fee||"")+'"></label>',"Save","dofee")); return; }
     if(a==="dofee"){ if(!o) return; act(o,"fee",{fee:Number(val("f_fee"))||0}); return; }
+    if(a==="dosendreview"){ if(!o) return; act(o,"sendreview",{name:val("rv_name"),eta:val("rv_eta"),note:val("rv_note")}); return; }
+    if(a==="doreviewback"){ if(!o) return; act(o,"reviewback",{text:val("rv_text")}); return; }
+    if(a==="doprelim"){ if(!o) return; act(o,"prelim",{fee:val("pl_fee"),value:Number(val("pl_value"))||0}); return; }
+    if(a==="dorevise"){ if(!o) return; var rt=val("rv_req"); if(!rt){ toast("Describe the revision."); return; } act(o,"revise",{kind:val("rv_kind"),text:rt}); return; }
+    if(a==="dopaid"){ if(!o) return; act(o,"paid",{amount:Number(val("py_amt"))||0,method:val("py_method"),ref:val("py_ref")}); return; }
+    if(a==="dodocreq"){ if(!o) return; var di=val("dq_items"); if(!di){ toast("List what you need."); return; } act(o,"docreq",{items:di}); return; }
+    if(a==="assign"){ if(!o) return; modal(sheet((o.assignedTo?"Reassign":"Assign")+" this order",'<p class="sm muted">The appraiser is notified. Their own calendar is used for booking.</p><label class="f">Appraiser'+sel("as_who",S.appraisers.map(function(x){ return x.name; }),o.assignedName||"")+'</label>',"Assign","doassign")); return; }
+    if(a==="doassign"){ if(!o) return; var aw=S.appraisers.filter(function(x){ return x.name===val("as_who"); })[0]; if(!aw){ toast("Pick an appraiser."); return; } act(o,"assign",{userId:aw.id,name:aw.name}); return; }
+    if(a==="myprofile"){ api("GET","/api/me").then(function(d){ var m=d.me; modal(sheet("My profile",'<p class="sm muted">Your license and insurance dates are shown to the administrator, who is warned before they lapse.</p><div class="grid2"><label class="f">Mobile<input id="mp_phone" value="'+esc(m.phone||"")+'"></label><label class="f">License number<input id="mp_lic" value="'+esc(m.license_no||"")+'"></label></div><div class="grid3"><label class="f">License state<input id="mp_state" value="'+esc(m.license_state||"")+'"></label><label class="f">License expires<input id="mp_licexp" type="date" value="'+esc(m.license_expires||"")+'"></label><label class="f">E&amp;O expires<input id="mp_eoexp" type="date" value="'+esc(m.eo_expires||"")+'"></label></div><label class="f">E&amp;O carrier<input id="mp_eo" value="'+esc(m.eo_carrier||"")+'"></label>',"Save","domyprofile")); }).catch(fail); return; }
+    if(a==="domyprofile"){ api("PATCH","/api/me",{phone:val("mp_phone"),licenseNo:val("mp_lic"),licenseState:val("mp_state"),licenseExpires:val("mp_licexp"),eoExpires:val("mp_eoexp"),eoCarrier:val("mp_eo")}).then(function(){ modal(""); toast("Profile saved."); }).catch(fail); return; }
     if(a==="editorder"){ if(!o) return; modal('<div class="sheet" data-a="closesheet"><div class="sheetc" data-stop="1" style="max-width:820px"><div class="stack"><div><h2 style="font-size:17px">Edit order</h2><p class="sm muted" style="margin-top:3px">Every change is written to the record. If a contact detail changes after messages went out, resend the link.</p></div>'+orderForm(o,"e")+'<div class="row"><button class="btn btn-p" data-a="doedit">Save changes</button><button class="btn" data-a="closesheet">Cancel</button></div></div></div></div>'); return; }
     if(a==="doedit"){ if(!o) return; var eb=readOrderForm("e"); if(!eb.addr){ toast("A property address is required."); return; } act(o,"edit",eb); return; }
     if(a==="reissue"){ if(!o) return; if(!confirm("Issue new client links? The old links stop working immediately. Use this if a link was sent to the wrong person.")) return; act(o,"reissue",{}); return; }
     if(a==="dohold"){ if(!o) return; act(o,"hold",{reason:val("h_reason"),note:val("h_note")},Number(t.dataset.from)); return; }
     if(a==="dodecline"){ if(!o) return; act(o,"decline",{reason:val("d_reason"),note:val("d_note")},Number(t.dataset.from)); return; }
     if(a==="docancel"){ if(!o) return; act(o,"cancel",{reason:val("x_reason"),note:val("x_note")},Number(t.dataset.from)); return; }
-    if(a==="doaccept"){ if(!o) return; act(o,"accept",{fee:val("a_fee")},Number(t.dataset.from)); return; }
+    if(a==="doaccept"){ if(!o) return; act(o,"accept",{fee:val("a_fee"),etaDate:val("a_eta"),note:val("a_note")},Number(t.dataset.from)); return; }
     if(a==="doinvoice"){ if(!o) return; act(o,"invoice",{fee:val("i_fee")},Number(t.dataset.from)); return; }
     if(a==="dobook"){ if(!o) return; var w=val("b_when"); var wm=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(w); if(!wm){ toast("Pick a date and time."); return; } var ms=CORE.zonedToUtc(+wm[1],+wm[2],+wm[3],+wm[4],+wm[5],tz()); if(!isFinite(ms)){ toast("That date is not valid."); return; } act(o,"book",{slot:new Date(ms).toISOString()},Number(t.dataset.from)); return; }
     if(a==="reschedule"){ if(!S.token) return; if(!confirm("Cancel this time and pick a new one?")) return; api("POST","/api/client/"+encodeURIComponent(S.token)+"/reschedule",{}).then(function(d){ toast("<b>"+esc(d.reply)+"</b>"); return loadClient(); }).catch(function(e){ fail(e); loadClient(); }); return; }

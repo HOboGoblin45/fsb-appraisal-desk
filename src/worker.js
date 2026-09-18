@@ -1,4 +1,4 @@
-/* FSB Appraisal Desk: Cloudflare Worker.
+/* Appraisal Desk: Cloudflare Worker.
    Serves the app (static assets) and the JSON API. D1 holds orders, people, the audit log and
    the message queue; KV (or R2) holds document bytes. Sessions are HttpOnly cookies backed by D1.
    Nothing here trusts the browser: every transition is re-validated by CORE.applyAction. */
@@ -75,11 +75,43 @@ async function limited(env, key, max, windowMs) {
   return false;
 }
 
+/* ---------- brand (white label) ---------- */
+function defaultBrand(env) {
+  return {name: env.LENDER_NAME || "Your Lender", short: env.LENDER_SHORT || "", tagline: env.LENDER_TAGLINE || "", primary: env.LENDER_PRIMARY || "#1f4984",
+    accent: env.LENDER_ACCENT || "#790000", timeZone: env.TIMEZONE || CORE.TZ, logo: env.LENDER_LOGO ? "/" + env.LENDER_LOGO : "", supportLine: "", productName: "Appraisal Desk"};
+}
+async function loadBrand(env) {
+  const b = defaultBrand(env);
+  const row = await env.DB.prepare("SELECT value FROM config WHERE key='brand'").first();
+  if (row) { try { Object.assign(b, JSON.parse(row.value)); } catch (e) {} }
+  if (b.logoKey) b.logo = "/brand/logo?v=" + (b.logoVersion || 1);
+  return b;
+}
+function cleanBrand(input, prev) {
+  const b = {...prev};
+  const hex = v => /^#[0-9a-fA-F]{6}$/.test(String(v || "")) ? String(v).toLowerCase() : null;
+  if (input.name !== undefined) b.name = s(input.name, 80) || prev.name;
+  if (input.short !== undefined) b.short = s(input.short, 20);
+  if (input.tagline !== undefined) b.tagline = s(input.tagline, 160);
+  if (input.supportLine !== undefined) b.supportLine = s(input.supportLine, 200);
+  if (input.productName !== undefined) b.productName = s(input.productName, 40) || "Appraisal Desk";
+  if (hex(input.primary)) b.primary = hex(input.primary);
+  if (hex(input.accent)) b.accent = hex(input.accent);
+  if (input.timeZone !== undefined) { try { new Intl.DateTimeFormat("en-US", {timeZone: String(input.timeZone)}); b.timeZone = String(input.timeZone); } catch (e) { throw bad("Unknown time zone."); } }
+  return b;
+}
+
 /* ---------- config ---------- */
-async function loadConfig(env) {
-  const row = await env.DB.prepare("SELECT value, updated_at FROM config WHERE key='availability'").first();
+/* Availability: a global record plus an optional per-appraiser record (key availability:<userId>) that wins for that appraiser's orders. */
+async function loadConfig(env, appraiserId) {
   const c = CORE.defaultConfig();
-  if (row) { try { Object.assign(c, JSON.parse(row.value)); c.updatedAt = row.updated_at; } catch (e) {} }
+  const rows = (await env.DB.prepare("SELECT key, value, updated_at FROM config WHERE key IN ('availability', ?, 'brand')").bind("availability:" + (appraiserId || "-")).all()).results || [];
+  const byKey = {}; rows.forEach(r => byKey[r.key] = r);
+  if (byKey.availability) { try { Object.assign(c, JSON.parse(byKey.availability.value)); c.updatedAt = byKey.availability.updated_at; } catch (e) {} }
+  const own = byKey["availability:" + appraiserId];
+  if (appraiserId && own) { try { const v = JSON.parse(own.value); delete v.deskCopyEmails; Object.assign(c, v); c.perAppraiser = true; } catch (e) {} }
+  const brand = defaultBrand(env); if (byKey.brand) { try { Object.assign(brand, JSON.parse(byKey.brand.value)); } catch (e) {} }
+  c.lenderName = brand.name; c.timeZone = brand.timeZone || CORE.TZ; c.brand = brand;
   return c;
 }
 function cleanConfig(input) {
@@ -89,7 +121,7 @@ function cleanConfig(input) {
   c.days = Array.isArray(input.days) ? input.days.map(Number).filter(d => d >= 0 && d <= 6) : [1, 2, 3, 4, 5];
   c.daysOff = Array.isArray(input.daysOff) ? input.daysOff.map(x => s(x, 10)).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x)).slice(0, 200) : [];
   c.appraiserName = s(input.appraiserName, 80); c.appraiserPhone = s(input.appraiserPhone, 40); c.appraiserEmail = s(input.appraiserEmail, 120).toLowerCase();
-  c.note = s(input.note, 500); c.timeZone = CORE.TZ;
+  c.note = s(input.note, 500);
   c.deskCopyEmails = Array.isArray(input.deskCopyEmails) ? input.deskCopyEmails.map(x => s(x, 120).toLowerCase()).filter(emailOk).slice(0, 20) : [];
   return c;
 }
@@ -141,6 +173,7 @@ function rowToOrder(r) {
   const o = JSON.parse(r.data);
   o.id = r.id; o.version = r.version; o.step = r.step; o.hold = !!r.hold; o.declined = !!r.declined; o.cancelled = !!r.cancelled;
   o.tokB = r.tok_b; o.tokA = r.tok_a; o.apptStart = r.appt_start || null; o.createdAt = r.created_at; o.updatedAt = r.updated_at;
+  if (r.assigned_to && !o.assignedTo) o.assignedTo = r.assigned_to;
   return o;
 }
 function orderFields(o) {
@@ -176,8 +209,11 @@ async function orderDetail(env, o) {
   o.messages = msgs.results || [];
   return o;
 }
-async function bookedStarts(env, exceptId) {
-  const rows = (await env.DB.prepare("SELECT appt_start FROM orders WHERE appt_start IS NOT NULL AND cancelled=0 AND declined=0 AND id<>?").bind(exceptId || "").all()).results || [];
+async function bookedStarts(env, exceptId, appraiserId) {
+  const q = appraiserId
+    ? env.DB.prepare("SELECT appt_start FROM orders WHERE appt_start IS NOT NULL AND cancelled=0 AND declined=0 AND id<>? AND (assigned_to=? OR assigned_to='')").bind(exceptId || "", appraiserId)
+    : env.DB.prepare("SELECT appt_start FROM orders WHERE appt_start IS NOT NULL AND cancelled=0 AND declined=0 AND id<>?").bind(exceptId || "");
+  const rows = (await q.all()).results || [];
   return rows.map(r => Date.parse(r.appt_start)).filter(isFinite);
 }
 function publicUrl(env, req) { return (env.PUBLIC_URL || new URL(req.url).origin).replace(/\/$/, ""); }
@@ -186,8 +222,9 @@ function publicUrl(env, req) { return (env.PUBLIC_URL || new URL(req.url).origin
 async function queueMessages(env, base, o, msgs, at) {
   if (!msgs.length) return [];
   at = at || nowISO();
-  const appraisers = (await env.DB.prepare("SELECT name,email,phone FROM users WHERE role='appraiser' AND active=1").all()).results || [];
-  const cfg = await loadConfig(env);
+  let appraisers = (await env.DB.prepare("SELECT id,name,email,phone FROM users WHERE role='appraiser' AND active=1").all()).results || [];
+  if (o.assignedTo && appraisers.some(a => a.id === o.assignedTo)) appraisers = appraisers.filter(a => a.id === o.assignedTo);
+  const cfg = await loadConfig(env, o.assignedTo);
   const pv = providers(env), emailOn = pv.email, smsOn = pv.sms;
   const link = t => base + "/#t=" + t, portal = base + "/#o=" + o.id;
   const stmts = [], out = [];
@@ -226,16 +263,17 @@ async function writeEvents(env, orderId, events) {
 }
 /* Apply one action with optimistic concurrency. Retries the whole read-apply-write on a version race. */
 async function runAction(env, base, ctx, orderId, action, params, actor, opts = {}) {
-  const cfg = await loadConfig(env);
   const at = opts.now || nowISO();
   for (let attempt = 0; attempt < 3; attempt++) {
     const row = await getOrderRow(env, orderId);
     if (!row) throw notFound("That order does not exist.");
     const o = rowToOrder(row);
+    const cfg = await loadConfig(env, o.assignedTo);
     if (opts.from !== undefined && opts.from !== null && Number(opts.from) !== o.step) throw new ApiError(409, "stale", "This order already moved to " + CORE.statusOf(o) + ".");
     if (opts.version !== undefined && opts.version !== null && Number(opts.version) !== o.version) throw new ApiError(409, "stale", "Someone else changed this order. It has been reloaded.");
     const p = {...params};
-    if (action === "book") p.booked = await bookedStarts(env, o.id);
+    if (action === "book") p.booked = await bookedStarts(env, o.id, o.assignedTo);
+    if (action === "assign") { const u = await env.DB.prepare("SELECT id,name FROM users WHERE id=? AND role='appraiser' AND active=1").bind(String(p.userId || "")).first(); if (!u) throw bad("Pick an active appraiser."); p.name = u.name; }
     if (action === "deliver") p.hasReport = !!(await env.DB.prepare("SELECT 1 FROM docs WHERE order_id=? AND kind='report' AND deleted_at IS NULL LIMIT 1").bind(o.id).first());
     if (action === "reissue") { o.tokB = randomToken(22); o.tokA = randomToken(22); }
     let result;
@@ -243,8 +281,8 @@ async function runAction(env, base, ctx, orderId, action, params, actor, opts = 
     catch (e) { if (e && e.code) throw new ApiError(e.code === "forbidden" ? 403 : 409, e.code, e.msg || e.message); throw e; }
     const data = {...o}; ["id", "version", "step", "hold", "declined", "cancelled", "tokB", "tokA", "apptStart", "createdAt", "updatedAt", "docs", "events", "messages", "docCount", "hasReport", "unsent"].forEach(k => delete data[k]);
     const f = orderFields(o);
-    const r = await env.DB.prepare("UPDATE orders SET version=version+1, step=?, hold=?, declined=?, cancelled=?, appt_start=?, updated_at=?, tok_b=?, tok_a=?, data=? WHERE id=? AND version=?")
-      .bind(f[0], f[1], f[2], f[3], f[4], f[5], o.tokB, o.tokA, JSON.stringify(data), o.id, row.version).run();
+    const r = await env.DB.prepare("UPDATE orders SET version=version+1, step=?, hold=?, declined=?, cancelled=?, appt_start=?, updated_at=?, tok_b=?, tok_a=?, assigned_to=?, data=? WHERE id=? AND version=?")
+      .bind(f[0], f[1], f[2], f[3], f[4], f[5], o.tokB, o.tokA, o.assignedTo || "", JSON.stringify(data), o.id, row.version).run();
     if (!r.meta || r.meta.changes !== 1) continue; // lost the race, re-read and try again
     o.version = row.version + 1;
     await writeEvents(env, o.id, result.events);
@@ -267,8 +305,14 @@ async function createOrder(env, base, ctx, b, user, at) {
     purpose: CORE.PURPOSES.includes(b.purpose) ? b.purpose : "Purchase", due: /^\d{4}-\d{2}-\d{2}$/.test(s(b.due, 10)) ? s(b.due, 10) : "",
     fee: Number(b.fee) || 0, rush: !!b.rush, borrowerName: s(b.borrowerName, 120), borrowerPhone: s(b.borrowerPhone, 40), borrowerEmail: s(b.borrowerEmail, 120).toLowerCase(),
     agentName: s(b.agentName, 120), agentPhone: s(b.agentPhone, 40), agentEmail: s(b.agentEmail, 120).toLowerCase(),
-    accessVia: CORE.ACCESS.includes(b.accessVia) ? b.accessVia : "Borrower", notes: s(b.notes, 2000),
+    accessVia: CORE.ACCESS.includes(b.accessVia) ? b.accessVia : "Borrower", notes: s(b.notes, 2000), accessNotes: s(b.accessNotes, 500),
     officerName: s(b.officerName, 120), officerEmail: s(b.officerEmail, 120).toLowerCase(),
+    loanType: CORE.LOAN_TYPES.includes(b.loanType) ? b.loanType : "", premise: CORE.PREMISES.includes(b.premise) ? b.premise : "As is",
+    occupancy: CORE.OCCUPANCY.includes(b.occupancy) ? b.occupancy : "", propertyType: CORE.PROPERTY_TYPES.includes(b.propertyType) ? b.propertyType : "",
+    units: Number(b.units) || 0, pins: s(b.pins, 200), closingDate: /^\d{4}-\d{2}-\d{2}$/.test(s(b.closingDate, 10)) ? s(b.closingDate, 10) : "",
+    earliestInspection: /^\d{4}-\d{2}-\d{2}$/.test(s(b.earliestInspection, 10)) ? s(b.earliestInspection, 10) : "",
+    deliveryFormat: CORE.DELIVERY_FORMATS.includes(b.deliveryFormat) ? b.deliveryFormat : "PDF", refNo: s(b.refNo, 60), groupRef: s(b.groupRef, 60), combinedReport: !!b.combinedReport,
+    intendedUse: s(b.intendedUse, 1000), assignedTo: "", assignedName: "",
     step: 0, hold: false, holdReason: "", declined: false, cancelled: false, clientContacted: false,
     orderedBy: user.name, orderedByRole: CORE.ROLES[role].name, orderedByEmail: user.email, orderedById: user.id, orderedAt: at, attestation: true,
     createdAt: at, updatedAt: at
@@ -276,10 +320,13 @@ async function createOrder(env, base, ctx, b, user, at) {
   if (o.borrowerEmail && !emailOk(o.borrowerEmail)) throw bad("The borrower email does not look right.");
   if (o.agentEmail && !emailOk(o.agentEmail)) throw bad("The agent email does not look right.");
   if (o.officerEmail && !emailOk(o.officerEmail)) throw bad("The loan officer email does not look right.");
+  if (o.purpose === "Purchase" && !o.due && o.closingDate) o.due = o.closingDate;
+  if (b.assignedTo) { const u = await env.DB.prepare("SELECT id,name FROM users WHERE id=? AND role='appraiser' AND active=1").bind(String(b.assignedTo)).first(); if (!u) throw bad("That appraiser is not active."); o.assignedTo = u.id; o.assignedName = u.name; }
+  else { const only = (await env.DB.prepare("SELECT id,name FROM users WHERE role='appraiser' AND active=1").all()).results || []; if (only.length === 1) { o.assignedTo = only[0].id; o.assignedName = only[0].name; } }
   const id = uid("o"), tokB = randomToken(22), tokA = randomToken(22);
-  const cfg = await loadConfig(env);
+  const cfg = await loadConfig(env, o.assignedTo);
   const data = {...o}; delete data.createdAt; delete data.updatedAt;
-  await env.DB.prepare("INSERT INTO orders (id,version,step,hold,declined,cancelled,tok_b,tok_a,appt_start,created_at,updated_at,data) VALUES (?,1,0,0,0,0,?,?,NULL,?,?,?)").bind(id, tokB, tokA, o.createdAt, o.updatedAt, JSON.stringify(data)).run();
+  await env.DB.prepare("INSERT INTO orders (id,version,step,hold,declined,cancelled,tok_b,tok_a,appt_start,created_at,updated_at,assigned_to,data) VALUES (?,1,0,0,0,0,?,?,NULL,?,?,?,?)").bind(id, tokB, tokA, o.createdAt, o.updatedAt, o.assignedTo || "", JSON.stringify(data)).run();
   o.id = id; o.tokB = tokB; o.tokA = tokA; o.version = 1;
   await writeEvents(env, id, [{at, who: user.name, role, what: "Order created. Recusal attestation recorded."}]);
   const msgs = CORE.templates.created(o, cfg).map(m => ({...m, template: "created"}));
@@ -287,21 +334,33 @@ async function createOrder(env, base, ctx, b, user, at) {
   if (ctx && queued.some(q => q.status === "queued")) ctx.waitUntil(dispatch(env, 8));
   return o;
 }
+/* Daily reminders the system owes the appraiser (accept, schedule, inspect, deliver, no activity). */
+async function runNudges(env, base) {
+  const rows = (await env.DB.prepare("SELECT * FROM orders WHERE cancelled=0 AND declined=0 AND step<7 AND hold=0").all()).results || [];
+  let n = 0;
+  for (const r of rows) {
+    const o = rowToOrder(r);
+    for (const key of CORE.nudgesDue(o, Date.now())) { try { await runAction(env, base, null, o.id, "nudge", {key}, {name: "System", role: "system"}); n++; } catch (e) {} }
+  }
+  return n;
+}
 
 /* ---------- sending ---------- */
 function providers(env) {
   return {email: !!(env.EMAIL || env.RESEND_API_KEY), emailVia: env.EMAIL ? "cloudflare" : (env.RESEND_API_KEY ? "resend" : ""), sms: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_FROM)};
 }
 async function sendEmail(env, m) {
-  const from = env.MAIL_FROM || "First Security Bank Appraisal Desk <appraisals@fsb.apprifi.com>";
+  const lender = (await loadBrand(env)).name;
+  const host = (env.PUBLIC_URL || "https://example.com").replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const from = env.MAIL_FROM || (lender + " Appraisal Desk <no-reply@" + host + ">");
   if (env.EMAIL) {
     // Cloudflare Email Service binding: the sending domain is verified in the same account
-    const r = await env.EMAIL.send({to: m.to_addr, from, subject: m.subject || "First Security Bank appraisal update", text: m.body, replyTo: env.MAIL_REPLY_TO || undefined});
+    const r = await env.EMAIL.send({to: m.to_addr, from, subject: m.subject || (lender + " appraisal update"), text: m.body, replyTo: env.MAIL_REPLY_TO || undefined});
     return (r && r.messageId) || "";
   }
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST", headers: {"authorization": "Bearer " + env.RESEND_API_KEY, "content-type": "application/json"},
-    body: JSON.stringify({from, to: [m.to_addr], subject: m.subject || "First Security Bank appraisal update", text: m.body, reply_to: env.MAIL_REPLY_TO || undefined})
+    body: JSON.stringify({from, to: [m.to_addr], subject: m.subject || (lender + " appraisal update"), text: m.body, reply_to: env.MAIL_REPLY_TO || undefined})
   });
   const t = await res.text();
   if (!res.ok) throw new Error("Resend " + res.status + ": " + t.slice(0, 300));
@@ -359,7 +418,14 @@ function logText(o, cfg) {
   const L = [];
   L.push("APPRAISER INDEPENDENCE RECORD"); L.push("");
   L.push("Property: " + o.addr + ", " + o.city); L.push("Order: " + o.id); L.push("Loan number: " + (o.loan || "not provided"));
-  L.push("Report type: " + o.type + ", " + o.purpose); L.push("Client: First Security Bank, Mackinaw, Illinois");
+  L.push("Product: " + o.type + ", " + o.purpose + (o.loanType ? ", " + o.loanType : "") + (o.premise ? ", " + o.premise : "")); L.push("Client: " + cfg.lenderName + (cfg.brand && cfg.brand.tagline ? ", " + cfg.brand.tagline : ""));
+  if (o.refNo || o.pins) L.push("Lender reference: " + (o.refNo || "n/a") + "; parcels: " + (o.pins || "n/a"));
+  if (o.assignedName) L.push("Assigned appraiser: " + o.assignedName);
+  if (o.etaDate) L.push("Committed delivery date: " + o.etaDate);
+  if (o.review) L.push("Reviewer: " + (o.review.name || "") + " (" + o.review.status + (o.review.signedAt ? ", signed " + o.review.signedAt : "") + ")");
+  if (o.prelim) L.push("Preliminary figures released " + o.prelim.at + (o.prelim.value ? " (value " + o.prelim.value + ")" : ""));
+  if (o.revision) L.push("Revisions: " + o.revision.n + " (" + o.revision.kind + ")");
+  if (o.paid) L.push("Payment: " + o.paid.amount + " by " + o.paid.method + (o.paid.ref ? " ref " + o.paid.ref : "") + " on " + o.paid.at);
   L.push("Appraiser: " + (o.appraiserName || cfg.appraiserName || "not recorded")); L.push("Status: " + CORE.statusOf(o)); L.push("Exported: " + new Date().toISOString()); L.push("");
   L.push("ORDERING AND RECUSAL");
   L.push("Ordered by: " + o.orderedBy + " (" + o.orderedByRole + ", " + (o.orderedByEmail || "") + ")"); L.push("Ordered at: " + o.orderedAt);
@@ -376,14 +442,14 @@ function logText(o, cfg) {
   L.push("MESSAGES");
   (o.messages || []).forEach(m => { L.push("  " + m.created_at + "  " + m.channel.toUpperCase() + " to " + m.to_name + (m.to_addr ? " <" + m.to_addr + ">" : "") + "  [" + m.status + (m.sent_at ? " " + m.sent_at : "") + "]" + (m.subject ? "  subject: " + m.subject : "")); L.push("      " + m.body.replace(/\n/g, "\n      ")); });
   if (!(o.messages || []).length) L.push("  none"); L.push("");
-  L.push("Generated by the FSB Appraisal Desk portal.");
+  L.push("Generated by the " + cfg.lenderName + " Appraisal Desk portal.");
   return L.join("\n");
 }
 function icsFor(o, cfg) {
   const dt = iso => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
   const esc = t => String(t || "").replace(/\\/g, "\\\\").replace(/;/g, "\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
-  return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//First Security Bank//Appraisal Desk//EN", "METHOD:PUBLISH", "BEGIN:VEVENT",
-    "UID:" + o.id + "@fsb.apprifi.com", "DTSTAMP:" + dt(nowISO()), "DTSTART:" + dt(o.apptStart), "DTEND:" + dt(o.apptEnd || (Date.parse(o.apptStart) + 3600e3)),
+  return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//" + esc(cfg.lenderName) + "//Appraisal Desk//EN", "METHOD:PUBLISH", "BEGIN:VEVENT",
+    "UID:" + o.id + "@appraisal-desk", "DTSTAMP:" + dt(nowISO()), "DTSTART:" + dt(o.apptStart), "DTEND:" + dt(o.apptEnd || (Date.parse(o.apptStart) + 3600e3)),
     "SUMMARY:" + esc("Appraisal inspection: " + o.addr), "LOCATION:" + esc(o.addr + ", " + o.city),
     "DESCRIPTION:" + esc(CORE.aprCap(cfg) + " will need access to every room, the basement and the garage. " + CORE.contactLine(cfg)),
     "END:VEVENT", "END:VCALENDAR"].join("\r\n");
@@ -411,18 +477,40 @@ async function api(req, env, ctx) {
     const row = await env.DB.prepare("SELECT * FROM orders WHERE tok_b=? OR tok_a=?").bind(tok, tok).first();
     if (!row) throw notFound("This link is not valid.");
     const o = rowToOrder(row), party = row.tok_b === tok ? "borrower" : "agent";
-    const cfg = await loadConfig(env);
+    const cfg = await loadConfig(env, o.assignedTo);
     const actor = {name: party === "agent" ? (o.agentName || "Agent") : (o.borrowerName || "Borrower"), role: "client"};
     if (method === "GET" && !p(3)) {
-      const booked = await bookedStarts(env, o.id);
+      const booked = await bookedStarts(env, o.id, o.assignedTo);
+      const uploaded = (await env.DB.prepare("SELECT name,uploaded_at FROM docs WHERE order_id=? AND uploaded_role='client' AND deleted_at IS NULL ORDER BY uploaded_at").bind(o.id).all()).results || [];
       const report = o.step >= 6 ? await env.DB.prepare("SELECT id,name,size FROM docs WHERE order_id=? AND deleted_at IS NULL AND client_visible=1 AND kind IN ('report','addendum') ORDER BY uploaded_at DESC LIMIT 1").bind(o.id).first() : null;
       return json({
         orderId: o.id, addr: o.addr, city: o.city, step: o.step, hold: !!o.hold, declined: !!o.declined, cancelled: !!o.cancelled,
         apptStart: o.apptStart, apptEnd: o.apptEnd || null, party, who: actor.name, contactParty: CORE.contactParty(o),
         slotMinutes: cfg.slotMinutes, appraiser: {name: cfg.appraiserName || "", phone: cfg.appraiserPhone || ""},
         slots: o.step === 2 && !o.hold && !o.cancelled ? CORE.genSlots(cfg, booked, Date.now(), 24) : [],
-        report: report || null, consent: !!(o.consent && o.consent[party]), tz: cfg.timeZone || CORE.TZ
+        report: report || null, consent: !!(o.consent && o.consent[party]), tz: cfg.timeZone || CORE.TZ,
+        lender: {name: cfg.lenderName, tagline: cfg.brand.tagline || "", logo: cfg.brand.logoKey ? "/brand/logo?v=" + (cfg.brand.logoVersion || 1) : cfg.brand.logo, primary: cfg.brand.primary, accent: cfg.brand.accent},
+        docRequest: o.docRequest && CORE.isOpen(o) ? o.docRequest.items : "", uploaded
       });
+    }
+    if (method === "POST" && p(3) === "docs") {
+      if (!CORE.isOpen(o)) throw bad("This file is closed.");
+      if (await limited(env, "cupload:" + tok, 30, 24 * 3600e3)) throw new ApiError(429, "rate", "Upload limit reached for today.");
+      const form = await req.formData();
+      const files = form.getAll("file").filter(f => f && typeof f === "object" && f.size !== undefined);
+      if (!files.length) throw bad("No file was received.");
+      const st = store(env);
+      for (const f of files) {
+        const ext = (f.name.split(".").pop() || "").toLowerCase(), type = TYPES[ext];
+        if (!type) throw bad(f.name + " is not a supported file type (PDF, images, Office files).");
+        if (f.size > MAX_FILE) throw bad(f.name + " is over the 20 MB limit."); if (!f.size) throw bad(f.name + " is empty.");
+        const did = uid("d"), key = "doc/" + o.id + "/" + did;
+        await st.put(key, await f.arrayBuffer(), type);
+        await env.DB.prepare("INSERT INTO docs (id,order_id,name,size,type,kind,client_visible,storage,key,uploaded_by,uploaded_role,uploaded_at) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)")
+          .bind(did, o.id, s(f.name, 200), f.size, type, "other", st.kind, key, actor.name, "client", nowISO()).run();
+        await runAction(env, publicUrl(env, req), ctx, o.id, "clientdoc", {name: f.name}, actor);
+      }
+      return json({ok: true, reply: files.length + " file" + (files.length === 1 ? "" : "s") + " received. Thank you."});
     }
     if (method === "GET" && p(3) === "appointment.ics") {
       if (!o.apptStart) throw notFound("No appointment is booked.");
@@ -450,10 +538,11 @@ async function api(req, env, ctx) {
   if (path === "/api/session" && method === "GET") {
     const user = await currentUser(env, req);
     const count = (await env.DB.prepare("SELECT COUNT(*) n FROM users").first()).n;
-    const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv", demo: !!env.DEMO};
-    if (user) out.config = await loadConfig(env);
+    const out = {user: user ? pubUser(user) : null, provisioned: count > 0, providers: providers(env), time: nowISO(), storage: env.BUCKET ? "r2" : "kv", demo: !!env.DEMO, brand: await loadBrand(env)};
+    if (user) { out.config = await loadConfig(env, user.role === "appraiser" ? user.id : undefined); out.appraisers = (await env.DB.prepare("SELECT id,name FROM users WHERE role='appraiser' AND active=1 ORDER BY name").all()).results || []; }
     return json(out);
   }
+  if (path === "/api/brand" && method === "GET") return json({brand: await loadBrand(env)});
   if (path === "/api/login" && method === "POST") {
     requireSecret(env);
     const b = await readJSON(req);
@@ -514,11 +603,46 @@ async function api(req, env, ctx) {
     return json({ok: true});
   }
 
+  /* --- brand (admin) --- */
+  if (path === "/api/brand" && method === "PUT") {
+    if (!CORE.can(role, "brand")) throw denied("Only the administrator changes branding.");
+    const prev = await loadBrand(env); const b = cleanBrand(await readJSON(req), prev);
+    const store_ = {...b}; delete store_.logo;
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO config (key,value,updated_at,updated_by) VALUES ('brand',?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by").bind(JSON.stringify(store_), nowISO(), user.name),
+      env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), user.name, "Updated the lender branding.")
+    ]);
+    return json({ok: true, brand: await loadBrand(env)});
+  }
+  if (path === "/api/brand/logo" && method === "POST") {
+    if (!CORE.can(role, "brand")) throw denied();
+    const form = await req.formData(); const f = form.get("file");
+    if (!f || typeof f !== "object") throw bad("No file was received.");
+    const ext = (f.name.split(".").pop() || "").toLowerCase(), type = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml"}[ext];
+    if (!type) throw bad("Use a PNG, JPG, WebP or SVG.");
+    if (f.size > 1024 * 1024) throw bad("Keep the logo under 1 MB.");
+    await env.FILES.put("brand/logo", await f.arrayBuffer(), {metadata: {type}});
+    const prev = await loadBrand(env); const b = {...prev, logoKey: "brand/logo", logoType: type, logoVersion: (prev.logoVersion || 0) + 1}; delete b.logo;
+    await env.DB.prepare("INSERT INTO config (key,value,updated_at,updated_by) VALUES ('brand',?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by").bind(JSON.stringify(b), nowISO(), user.name).run();
+    return json({ok: true, brand: await loadBrand(env)});
+  }
+  if (path === "/api/me" && method === "PATCH") {
+    const b = await readJSON(req);
+    const d = /^\d{4}-\d{2}-\d{2}$/;
+    await env.DB.prepare("UPDATE users SET phone=?, license_no=?, license_state=?, license_expires=?, eo_expires=?, eo_carrier=?, updated_at=? WHERE id=?")
+      .bind(s(b.phone, 40), s(b.licenseNo, 40), s(b.licenseState, 20), d.test(s(b.licenseExpires, 10)) ? s(b.licenseExpires, 10) : "", d.test(s(b.eoExpires, 10)) ? s(b.eoExpires, 10) : "", s(b.eoCarrier, 80), nowISO(), user.id).run();
+    return json({ok: true});
+  }
+  if (path === "/api/me" && method === "GET") {
+    const u = await env.DB.prepare("SELECT id,name,email,role,phone,license_no,license_state,license_expires,eo_expires,eo_carrier FROM users WHERE id=?").bind(user.id).first();
+    return json({me: u});
+  }
+
   /* --- people (admin) --- */
   if (p(1) === "users") {
     if (role !== "admin") throw denied("Only the bank administrator manages people.");
     if (method === "GET" && !p(2)) {
-      const rows = (await env.DB.prepare("SELECT u.id,u.email,u.name,u.role,u.phone,u.active,u.created_at,u.created_by,u.last_seen,(u.pw_hash IS NOT NULL) has_pw,(SELECT MAX(expires_at) FROM invites i WHERE i.user_id=u.id AND i.used_at IS NULL) invite_expires FROM users u ORDER BY u.name").all()).results || [];
+      const rows = (await env.DB.prepare("SELECT u.id,u.email,u.name,u.role,u.phone,u.active,u.created_at,u.created_by,u.last_seen,u.license_no,u.license_state,u.license_expires,u.eo_expires,u.eo_carrier,(u.pw_hash IS NOT NULL) has_pw,(SELECT MAX(expires_at) FROM invites i WHERE i.user_id=u.id AND i.used_at IS NULL) invite_expires FROM users u ORDER BY u.name").all()).results || [];
       return json({users: rows.map(r => ({...r, active: !!r.active, has_pw: !!r.has_pw}))});
     }
     if (method === "POST" && !p(2)) {
@@ -575,21 +699,23 @@ async function api(req, env, ctx) {
 
   /* --- config --- */
   if (path === "/api/config") {
-    if (method === "GET") return json({config: await loadConfig(env)});
+    if (method === "GET") return json({config: await loadConfig(env, url.searchParams.get("for") || (role === "appraiser" ? user.id : undefined))});
     if (method === "PUT") {
       if (!CORE.can(role, "config")) throw denied("Only the appraiser or the administrator can change availability.");
       const c = cleanConfig(await readJSON(req));
       if (role !== "admin") c.deskCopyEmails = (await loadConfig(env)).deskCopyEmails || [];
+      const key = role === "appraiser" ? "availability:" + user.id : "availability";
       await env.DB.batch([
-        env.DB.prepare("INSERT INTO config (key,value,updated_at,updated_by) VALUES ('availability',?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by").bind(JSON.stringify(c), nowISO(), user.name),
+        env.DB.prepare("INSERT INTO config (key,value,updated_at,updated_by) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by").bind(key, JSON.stringify(c), nowISO(), user.name),
         env.DB.prepare("INSERT INTO audit (at,who,what) VALUES (?,?,?)").bind(nowISO(), user.name, "Updated appraiser availability and contact settings.")
       ]);
-      return json({ok: true, config: c});
+      return json({ok: true, config: await loadConfig(env, role === "appraiser" ? user.id : undefined)});
     }
   }
   if (path === "/api/slots" && method === "GET") {
-    const cfg = await loadConfig(env);
-    return json({slots: CORE.genSlots(cfg, await bookedStarts(env, ""), Date.now(), Number(url.searchParams.get("n")) || 8)});
+    const who = role === "appraiser" ? user.id : (url.searchParams.get("for") || undefined);
+    const cfg = await loadConfig(env, who);
+    return json({slots: CORE.genSlots(cfg, await bookedStarts(env, "", who), Date.now(), Number(url.searchParams.get("n")) || 8)});
   }
 
   /* --- feedback --- */
@@ -752,6 +878,11 @@ export default {
     try {
       if (url.pathname === "/api" || url.pathname.startsWith("/api/")) return await api(req, env, ctx);
       if (url.pathname.startsWith("/f/")) return await fileRoute(req, env);
+      if (url.pathname === "/brand/logo") {
+        const v = await env.FILES.getWithMetadata("brand/logo", "stream");
+        if (!v || !v.value) throw notFound();
+        return new Response(v.value, {headers: {"content-type": (v.metadata && v.metadata.type) || "image/png", "cache-control": "public, max-age=3600"}});
+      }
       const res = await env.ASSETS.fetch(req);
       const h = new Headers(res.headers);
       Object.entries(SEC).forEach(([k, v]) => h.set(k, v));
@@ -770,6 +901,7 @@ export default {
     ctx.waitUntil((async () => {
       if (env.DEMO && event.cron === "0 8 * * *") { await resetDemo(env, (env.PUBLIC_URL || "").replace(/\/$/, ""), {createOrder, runAction, setPassword, store, writeEvents, uid, randomToken, nowISO}); return; }
       await dispatch(env, 50);
+      const d = new Date(); if (d.getUTCHours() === 13 && d.getUTCMinutes() < 5) await runNudges(env, (env.PUBLIC_URL || "").replace(/\/$/, ""));
       await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(nowISO()).run();
       await env.DB.prepare("DELETE FROM ratelimit WHERE window_start < ?").bind(Date.now() - 864e5).run();
     })());

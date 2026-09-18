@@ -641,7 +641,7 @@ var CORE = (function(){
     /* the lockup: Apprifi, then the lender as the client (its own logo if it uploaded one, otherwise its name) */
     var wrap=document.querySelector(".topin"), lock=wrap.querySelector(".brandlock");
     if(!lock){ lock=document.createElement("a"); lock.className="brandlock"; lock.href="./"; wrap.insertBefore(lock,wrap.firstChild); }
-    lock.innerHTML='<img class="plogo" src="/apprifi-logo.svg" alt="'+esc(b.productName||"Apprifi")+'" width="152" height="40">'+
+    lock.innerHTML='<img class="plogo" src="/apprifi-logo.svg" alt="'+esc(b.productName||"Apprifi")+'" width="168" height="40">'+
       '<span class="lsep" aria-hidden="true"></span>'+
       (b.logo?'<img class="llogo" src="'+esc(b.logo)+'" alt="'+esc(b.name)+'">':'<span class="lname"><b>'+esc(b.name)+'</b>'+(b.tagline?'<span>'+esc(b.tagline)+'</span>':'')+'</span>');
     var h1=document.querySelector(".mast h1"), tag=document.querySelector(".mast .tag");

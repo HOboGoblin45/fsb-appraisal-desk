@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40" role="img" aria-label="Apprifi">
-  <rect x="1" y="1" width="38" height="38" rx="9" fill="#12324f"/>
-  <path d="M20 8.5 8.5 20.5h4.2V31h14.6V20.5h4.2Z" fill="#ffffff"/>
-  <rect x="17.4" y="23.6" width="5.2" height="7.4" rx="1" fill="#d4652a"/>
-  <path d="M12.7 20.5h14.6" stroke="#12324f" stroke-width="1.6"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-label="Apprifi"><path d="M17 86 L50 15 L83 86" fill="none" stroke="#12324f" stroke-width="12.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M33 59 L47 73 L76 42" fill="none" stroke="#d4652a" stroke-width="12.5" stroke-linecap="round" stroke-linejoin="round"/></svg>

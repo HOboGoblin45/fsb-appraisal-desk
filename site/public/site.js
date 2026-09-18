@@ -1,6 +1,13 @@
 /* apprifi.com: the walkthrough request form and the sign-in router. No frameworks, no tracking. */
 (function(){
   "use strict";
+  /* reveal on scroll; everything is visible without it (no-JS, reduced motion, old browsers) */
+  var rv=document.querySelectorAll(".rv");
+  if("IntersectionObserver" in window && !window.matchMedia("(prefers-reduced-motion: reduce)").matches){
+    var io=new IntersectionObserver(function(es){ es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add("in"); io.unobserve(e.target); } }); },{rootMargin:"0px 0px -8% 0px",threshold:.08});
+    rv.forEach(function(el){ io.observe(el); });
+  } else { rv.forEach(function(el){ el.classList.add("in"); }); }
+  var mt=document.querySelector(".menu-toggle"); if(mt){ mt.querySelectorAll("a").forEach(function(a){ a.addEventListener("click",function(){ mt.removeAttribute("open"); }); }); }
   var req=document.getElementById("req");
   if(req){
     var msg=document.getElementById("reqmsg");
